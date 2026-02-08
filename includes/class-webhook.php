@@ -10,13 +10,12 @@ if (!defined('ABSPATH')) {
 
 class Superman_Links_Webhook {
 
-    // Hardcoded webhook URL for Superman Links CRM
-    private $webhook_url = 'https://wirntskjuuvqkvqbskmb.supabase.co/functions/v1/wordpress-webhook';
-
-    // Supabase anon key for authentication
-    private $supabase_anon_key = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Indpcm50c2tqdXV2cWt2cWJza21iIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ5NzE3OTgsImV4cCI6MjA4MDU0Nzc5OH0.xDdIyVs3mM82cvc01uFWxsV5J-AIt8ZNGJE7XmXgCBQ';
+    private $webhook_url;
+    private $supabase_anon_key;
 
     public function __construct() {
+        $this->webhook_url = get_option('superman_links_webhook_url', '');
+        $this->supabase_anon_key = get_option('superman_links_supabase_key', '');
         // Hook into post save
         add_action('save_post', [$this, 'on_post_save'], 20, 3);
 
@@ -84,7 +83,7 @@ class Superman_Links_Webhook {
     private function send_webhook($action, $post_id, $post) {
         $api_key = get_option('superman_links_api_key', '');
 
-        if (empty($api_key)) {
+        if (empty($api_key) || empty($this->webhook_url) || empty($this->supabase_anon_key)) {
             return;
         }
 
