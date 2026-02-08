@@ -35,7 +35,7 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 
 == Installation ==
 
-1. Download the latest release from https://github.com/brycehallcloud/superman-links-wp/releases
+1. Download the latest release from https://github.com/SupermanServicesCA/superman-links-wp/releases
 2. Upload the zip file via Plugins > Add New > Upload Plugin
 3. Activate the plugin through the 'Plugins' menu in WordPress
 4. Go to Settings > Superman Links to view your API key

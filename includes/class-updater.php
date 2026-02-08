@@ -22,7 +22,7 @@ class Superman_Links_Updater {
     public function __construct($plugin_file) {
         $this->plugin_file = $plugin_file;
         $this->plugin_slug = plugin_basename($plugin_file);
-        $this->github_repo = 'brycehallcloud/superman-links-wp';
+        $this->github_repo = 'SupermanServicesCA/superman-links-wp';
         $this->github_api_url = 'https://api.github.com/repos/' . $this->github_repo . '/releases/latest';
 
         add_filter('pre_set_site_transient_update_plugins', [$this, 'check_for_update']);

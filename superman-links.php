@@ -1,7 +1,7 @@
 <?php
 /**
  * Plugin Name: Superman Links
- * Plugin URI: https://github.com/brycehallcloud/superman-links-wp
+ * Plugin URI: https://github.com/SupermanServicesCA/superman-links-wp
  * Description: REST API bridge for Superman Links CRM - exposes page data, SEO metadata, and Elementor templates.
  * Version: 1.2.0
  * Author: Superman Links
