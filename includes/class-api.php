@@ -195,6 +195,48 @@ class Superman_Links_API {
             'callback' => [$this, 'import_elementor_template'],
             'permission_callback' => [$this, 'check_api_key'],
         ]);
+
+        // ==========================================
+        // Internal Links Endpoints
+        // ==========================================
+
+        // Crawl internal links from all published content
+        register_rest_route($this->namespace, '/internal-links', [
+            'methods' => 'GET',
+            'callback' => [$this, 'get_internal_links'],
+            'permission_callback' => [$this, 'check_api_key'],
+            'args' => [
+                'per_page' => [
+                    'default' => 100,
+                    'sanitize_callback' => 'absint',
+                ],
+                'page' => [
+                    'default' => 1,
+                    'sanitize_callback' => 'absint',
+                ],
+            ],
+        ]);
+
+        // Insert an internal link into a page
+        register_rest_route($this->namespace, '/internal-links', [
+            'methods' => 'POST',
+            'callback' => [$this, 'insert_internal_link'],
+            'permission_callback' => [$this, 'check_api_key'],
+            'args' => [
+                'source_post_id' => [
+                    'required' => true,
+                    'sanitize_callback' => 'absint',
+                ],
+                'target_url' => [
+                    'required' => true,
+                    'sanitize_callback' => 'esc_url_raw',
+                ],
+                'anchor_text' => [
+                    'required' => true,
+                    'sanitize_callback' => 'sanitize_text_field',
+                ],
+            ],
+        ]);
     }
 
     /**
@@ -969,6 +1011,466 @@ class Superman_Links_API {
                 update_post_meta($post_id, 'rank_math_description', sanitize_textarea_field($seo_data['meta_description']));
             }
         }
+    }
+
+    // ==========================================
+    // Internal Links Methods
+    // ==========================================
+
+    /**
+     * Crawl all published posts/pages for internal links
+     */
+    public function get_internal_links($request) {
+        $per_page = min($request->get_param('per_page'), 500);
+        $page = $request->get_param('page');
+        $site_url = get_site_url();
+        $site_host = wp_parse_url($site_url, PHP_URL_HOST);
+
+        $links = [];
+
+        // 1. Content links from posts/pages
+        $query = new WP_Query([
+            'post_type' => ['post', 'page'],
+            'post_status' => 'publish',
+            'posts_per_page' => -1,
+            'orderby' => 'modified',
+            'order' => 'DESC',
+        ]);
+        $posts_crawled = $query->found_posts;
+
+        foreach ($query->posts as $post) {
+            $source_url = get_permalink($post->ID);
+
+            // Parse standard content links
+            $content_links = $this->extract_links_from_html($post->post_content, $site_host);
+            foreach ($content_links as $link) {
+                $links[] = array_merge($link, [
+                    'source_post_id' => $post->ID,
+                    'source_url' => $source_url,
+                    'category' => 'content',
+                ]);
+            }
+
+            // Also parse Elementor JSON for links
+            if ($this->is_elementor_post($post->ID)) {
+                $elementor_links = $this->extract_elementor_links($post->ID, $site_host);
+                foreach ($elementor_links as $link) {
+                    $links[] = array_merge($link, [
+                        'source_post_id' => $post->ID,
+                        'source_url' => $source_url,
+                        'category' => 'content',
+                    ]);
+                }
+            }
+        }
+        wp_reset_postdata();
+
+        // 2. Menu links
+        $menu_links = $this->extract_menu_links($site_host);
+        $links = array_merge($links, $menu_links);
+
+        // 3. Footer widget links
+        $footer_links = $this->extract_footer_links($site_host);
+        $links = array_merge($links, $footer_links);
+
+        // Deduplicate by source_url + target_url (keep first occurrence)
+        $seen = [];
+        $unique_links = [];
+        foreach ($links as $link) {
+            $key = ($link['source_url'] ?? '') . '|' . $link['target_url'];
+            if (!isset($seen[$key])) {
+                $seen[$key] = true;
+                $unique_links[] = $link;
+            }
+        }
+
+        // Paginate
+        $total = count($unique_links);
+        $offset = ($page - 1) * $per_page;
+        $paginated = array_slice($unique_links, $offset, $per_page);
+
+        return rest_ensure_response([
+            'links' => array_values($paginated),
+            'total' => $total,
+            'posts_crawled' => $posts_crawled,
+            'total_pages' => (int) ceil($total / max($per_page, 1)),
+            'current_page' => $page,
+            'per_page' => $per_page,
+        ]);
+    }
+
+    /**
+     * Insert an internal link into a page's content
+     */
+    public function insert_internal_link($request) {
+        $source_post_id = $request->get_param('source_post_id');
+        $target_url = $request->get_param('target_url');
+        $anchor_text = $request->get_param('anchor_text');
+
+        $post = get_post($source_post_id);
+        if (!$post || $post->post_status !== 'publish') {
+            return new WP_Error(
+                'not_found',
+                __('Source post not found.', 'superman-links'),
+                ['status' => 404]
+            );
+        }
+
+        // Check if link already exists in content or Elementor data
+        $is_elementor = $this->is_elementor_post($source_post_id);
+        $content_has_link = strpos($post->post_content, $target_url) !== false;
+        $elementor_has_link = false;
+
+        if ($is_elementor) {
+            $elementor_data = get_post_meta($source_post_id, '_elementor_data', true);
+            $elementor_has_link = !empty($elementor_data) && strpos($elementor_data, $target_url) !== false;
+        }
+
+        if ($content_has_link || $elementor_has_link) {
+            return new WP_Error(
+                'link_exists',
+                __('Link to this URL already exists in the content.', 'superman-links'),
+                ['status' => 409]
+            );
+        }
+
+        if ($is_elementor) {
+            $result = $this->insert_link_elementor($source_post_id, $target_url, $anchor_text);
+        } else {
+            $result = $this->insert_link_standard($source_post_id, $target_url, $anchor_text);
+        }
+
+        if (is_wp_error($result)) {
+            return $result;
+        }
+
+        return rest_ensure_response([
+            'success' => true,
+            'source_post_id' => $source_post_id,
+            'target_url' => $target_url,
+            'anchor_text' => $anchor_text,
+            'is_elementor' => $is_elementor,
+        ]);
+    }
+
+    /**
+     * Extract links from HTML string (shared helper for content + widgets)
+     */
+    private function extract_links_from_html($html, $site_host) {
+        $links = [];
+
+        if (empty($html)) {
+            return $links;
+        }
+
+        $doc = new DOMDocument();
+        libxml_use_internal_errors(true);
+        $doc->loadHTML('<meta charset="UTF-8">' . $html);
+        libxml_clear_errors();
+
+        $anchors = $doc->getElementsByTagName('a');
+
+        foreach ($anchors as $anchor) {
+            $href = $anchor->getAttribute('href');
+            if (empty($href) || $href === '#') {
+                continue;
+            }
+
+            $anchor_text = trim($anchor->textContent);
+
+            // Resolve relative URLs
+            if (strpos($href, '/') === 0) {
+                $href = rtrim(get_site_url(), '/') . $href;
+            }
+
+            // Skip non-HTTP links (mailto, tel, javascript, etc.)
+            if (strpos($href, 'http') !== 0) {
+                continue;
+            }
+
+            // Check if same-domain
+            $link_host = wp_parse_url($href, PHP_URL_HOST);
+            if (!$link_host || $link_host !== $site_host) {
+                continue;
+            }
+
+            // Get context from parent element
+            $parent = $anchor->parentNode;
+            $context = $parent ? mb_substr(trim($parent->textContent), 0, 200) : '';
+
+            $target_post_id = url_to_postid($href);
+
+            $links[] = [
+                'target_url' => $href,
+                'target_post_id' => $target_post_id ?: null,
+                'anchor_text' => $anchor_text,
+                'link_context' => $context,
+            ];
+        }
+
+        return $links;
+    }
+
+    /**
+     * Extract links from Elementor JSON data
+     */
+    private function extract_elementor_links($post_id, $site_host) {
+        $elementor_data = get_post_meta($post_id, '_elementor_data', true);
+
+        if (empty($elementor_data)) {
+            return [];
+        }
+
+        $data = is_string($elementor_data) ? json_decode($elementor_data, true) : $elementor_data;
+        if (!is_array($data)) {
+            return [];
+        }
+
+        $links = [];
+        $this->walk_elementor_for_links($data, $site_host, $links);
+
+        return $links;
+    }
+
+    /**
+     * Recursively walk Elementor data to find links
+     */
+    private function walk_elementor_for_links($elements, $site_host, &$links) {
+        foreach ($elements as $element) {
+            // Text-editor widgets contain HTML with links
+            if (isset($element['widgetType']) && $element['widgetType'] === 'text-editor') {
+                $editor_content = $element['settings']['editor'] ?? '';
+                if (!empty($editor_content)) {
+                    $extracted = $this->extract_links_from_html($editor_content, $site_host);
+                    $links = array_merge($links, $extracted);
+                }
+            }
+
+            // Button widgets may have internal link URLs
+            if (isset($element['widgetType']) && $element['widgetType'] === 'button') {
+                $url = $element['settings']['link']['url'] ?? '';
+                if (!empty($url)) {
+                    if (strpos($url, '/') === 0) {
+                        $url = rtrim(get_site_url(), '/') . $url;
+                    }
+                    $link_host = wp_parse_url($url, PHP_URL_HOST);
+                    if ($link_host && $link_host === $site_host) {
+                        $links[] = [
+                            'target_url' => $url,
+                            'target_post_id' => url_to_postid($url) ?: null,
+                            'anchor_text' => $element['settings']['text'] ?? '',
+                            'link_context' => 'Elementor button widget',
+                        ];
+                    }
+                }
+            }
+
+            // Recurse into child elements
+            if (!empty($element['elements'])) {
+                $this->walk_elementor_for_links($element['elements'], $site_host, $links);
+            }
+        }
+    }
+
+    /**
+     * Extract links from WordPress navigation menus
+     */
+    private function extract_menu_links($site_host) {
+        $links = [];
+        $menus = wp_get_nav_menus();
+
+        if (empty($menus)) {
+            return $links;
+        }
+
+        // Identify footer menu locations
+        $locations = get_nav_menu_locations();
+        $footer_menu_ids = [];
+        foreach ($locations as $location => $menu_id) {
+            if (stripos($location, 'footer') !== false) {
+                $footer_menu_ids[] = $menu_id;
+            }
+        }
+
+        foreach ($menus as $menu) {
+            $items = wp_get_nav_menu_items($menu->term_id);
+            if (!$items) {
+                continue;
+            }
+
+            $is_footer = in_array($menu->term_id, $footer_menu_ids);
+            $category = $is_footer ? 'footer' : 'menu';
+
+            foreach ($items as $item) {
+                $href = $item->url;
+                if (empty($href) || $href === '#') {
+                    continue;
+                }
+
+                $link_host = wp_parse_url($href, PHP_URL_HOST);
+                if (!$link_host || $link_host !== $site_host) {
+                    continue;
+                }
+
+                $target_post_id = url_to_postid($href);
+
+                $links[] = [
+                    'source_post_id' => null,
+                    'source_url' => null,
+                    'target_url' => $href,
+                    'target_post_id' => $target_post_id ?: null,
+                    'anchor_text' => $item->title,
+                    'link_context' => 'Menu: ' . $menu->name,
+                    'category' => $category,
+                ];
+            }
+        }
+
+        return $links;
+    }
+
+    /**
+     * Extract links from footer sidebar widgets
+     */
+    private function extract_footer_links($site_host) {
+        $links = [];
+        $sidebars = wp_get_sidebars_widgets();
+
+        if (empty($sidebars)) {
+            return $links;
+        }
+
+        foreach ($sidebars as $sidebar_id => $widget_ids) {
+            if (stripos($sidebar_id, 'footer') === false) {
+                continue;
+            }
+            if (!is_array($widget_ids)) {
+                continue;
+            }
+
+            foreach ($widget_ids as $widget_id) {
+                $widget_content = $this->get_widget_content($widget_id);
+                if (empty($widget_content)) {
+                    continue;
+                }
+
+                $extracted = $this->extract_links_from_html($widget_content, $site_host);
+                foreach ($extracted as $link) {
+                    $links[] = array_merge($link, [
+                        'source_post_id' => null,
+                        'source_url' => null,
+                        'category' => 'footer',
+                    ]);
+                }
+            }
+        }
+
+        return $links;
+    }
+
+    /**
+     * Get widget content by widget ID
+     */
+    private function get_widget_content($widget_id) {
+        // Widget IDs are in format: type-number (e.g., "text-2", "custom_html-3")
+        $parts = explode('-', $widget_id);
+        $number = array_pop($parts);
+        $type = implode('-', $parts);
+
+        if (!is_numeric($number)) {
+            return '';
+        }
+
+        $option = get_option("widget_{$type}");
+        if (!is_array($option) || !isset($option[(int) $number])) {
+            return '';
+        }
+
+        $instance = $option[(int) $number];
+
+        // Return common content fields used by text/HTML widgets
+        return $instance['text'] ?? $instance['content'] ?? $instance['html'] ?? '';
+    }
+
+    /**
+     * Insert a link into a standard (non-Elementor) page
+     */
+    private function insert_link_standard($post_id, $target_url, $anchor_text) {
+        $post = get_post($post_id);
+        $link_html = sprintf(
+            "\n" . '<p class="superman-internal-link">Related: <a href="%s">%s</a></p>',
+            esc_url($target_url),
+            esc_html($anchor_text)
+        );
+
+        $result = wp_update_post([
+            'ID' => $post_id,
+            'post_content' => $post->post_content . $link_html,
+        ], true);
+
+        if (is_wp_error($result)) {
+            return $result;
+        }
+
+        return true;
+    }
+
+    /**
+     * Insert a link into an Elementor page's last text-editor widget
+     */
+    private function insert_link_elementor($post_id, $target_url, $anchor_text) {
+        $elementor_data = get_post_meta($post_id, '_elementor_data', true);
+
+        if (empty($elementor_data)) {
+            return $this->insert_link_standard($post_id, $target_url, $anchor_text);
+        }
+
+        $data = is_string($elementor_data) ? json_decode($elementor_data, true) : $elementor_data;
+        if (!is_array($data)) {
+            return $this->insert_link_standard($post_id, $target_url, $anchor_text);
+        }
+
+        $link_html = sprintf(
+            '<p class="superman-internal-link">Related: <a href="%s">%s</a></p>',
+            esc_url($target_url),
+            esc_html($anchor_text)
+        );
+
+        $modified = $this->append_to_last_text_editor($data, $link_html);
+
+        if (!$modified) {
+            // No text-editor widget found, fall back to post_content
+            return $this->insert_link_standard($post_id, $target_url, $anchor_text);
+        }
+
+        // Save updated Elementor data
+        update_post_meta($post_id, '_elementor_data', wp_json_encode($data));
+
+        // Regenerate CSS
+        $this->regenerate_elementor_css($post_id);
+
+        return true;
+    }
+
+    /**
+     * Recursively find and append HTML to the last text-editor widget
+     */
+    private function append_to_last_text_editor(&$elements, $html) {
+        for ($i = count($elements) - 1; $i >= 0; $i--) {
+            // Check child elements first (depth-first, last element)
+            if (!empty($elements[$i]['elements'])) {
+                if ($this->append_to_last_text_editor($elements[$i]['elements'], $html)) {
+                    return true;
+                }
+            }
+
+            if (isset($elements[$i]['widgetType']) && $elements[$i]['widgetType'] === 'text-editor') {
+                $elements[$i]['settings']['editor'] = ($elements[$i]['settings']['editor'] ?? '') . $html;
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
