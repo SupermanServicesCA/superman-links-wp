@@ -1,5 +1,5 @@
 === Superman Links ===
-Contributors: supermanlinks
+Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.0
 Tested up to: 6.7
