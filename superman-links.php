@@ -3,7 +3,7 @@
  * Plugin Name: Superman Links
  * Plugin URI: https://github.com/SupermanServicesCA/superman-links-wp
  * Description: REST API bridge for Superman Links CRM - exposes page data, SEO metadata, and Elementor templates.
- * Version: 1.2.1
+ * Version: 1.2.2
  * Author: Superman Services
  * Author URI: https://supermanservices.ca/website-design-and-development/
  * License: GPL v2 or later
@@ -14,7 +14,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('SUPERMAN_LINKS_VERSION', '1.2.1');
+define('SUPERMAN_LINKS_VERSION', '1.2.2');
 define('SUPERMAN_LINKS_PLUGIN_DIR', plugin_dir_path(__FILE__));
 
 // Include required files
@@ -52,7 +52,7 @@ function superman_links_activate() {
 
     // Set webhook config (stored in DB, not in source code)
     update_option('superman_links_webhook_url', base64_decode('aHR0cHM6Ly93aXJudHNranV1dnFrdnFic2ttYi5zdXBhYmFzZS5jby9mdW5jdGlvbnMvdjEvd29yZHByZXNzLXdlYmhvb2s='));
-    update_option('superman_links_supabase_key', base64_decode('ZXlKaGJHY2lPaUpJVXpJMU5pSXNJblI1Y0NJNklrcFhWQ0o5LmV5SnBjM01pT2lKemRYQmhZbUZ6WlNJc0luSmxaaUk2SW5kcGNtNTBjMnRxZFhWMmNXdDJjV0p6YTIxaUlpd2ljbTlzWlNJNkltRnViMjRpTENKcFlYUWlPakUzTmpRNU56RTNPVGdzSW1WNGNDSTZNVEE0TURVU05EYzNPVGg5LnhEZEl5VnMzbU04MmN2YzAxdUZXeHNWNUotQUl0OFpOR0pFN1htWGdDQlE='));
+    update_option('superman_links_supabase_key', base64_decode('ZXlKaGJHY2lPaUpJVXpJMU5pSXNJblI1Y0NJNklrcFhWQ0o5LmV5SnBjM01pT2lKemRYQmhZbUZ6WlNJc0luSmxaaUk2SW5kcGNtNTBjMnRxZFhWMmNXdDJjV0p6YTIxaUlpd2ljbTlzWlNJNkltRnViMjRpTENKcFlYUWlPakUzTmpRNU56RTNPVGdzSW1WNGNDSTZNakE0TURVME56YzVPSDAueERkSXlWczNtTTgyY3ZjMDF1Rld4c1Y1Si1BSXQ4Wk5HSkU3WG1YZ0NCUQ=='));
 }
 register_activation_hook(__FILE__, 'superman_links_activate');
 
