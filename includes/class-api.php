@@ -237,6 +237,47 @@ class Superman_Links_API {
                 ],
             ],
         ]);
+
+        // ==========================================
+        // Internal Link Juicer (ILJ) Integration
+        // ==========================================
+
+        // Check ILJ status
+        register_rest_route($this->namespace, '/ilj/status', [
+            'methods' => 'GET',
+            'callback' => [$this, 'get_ilj_status'],
+            'permission_callback' => [$this, 'check_api_key'],
+        ]);
+
+        // Get ILJ link index
+        register_rest_route($this->namespace, '/ilj/index', [
+            'methods' => 'GET',
+            'callback' => [$this, 'get_ilj_index'],
+            'permission_callback' => [$this, 'check_api_key'],
+            'args' => [
+                'per_page' => [
+                    'default' => 100,
+                    'sanitize_callback' => 'absint',
+                ],
+                'page' => [
+                    'default' => 1,
+                    'sanitize_callback' => 'absint',
+                ],
+            ],
+        ]);
+
+        // Push keywords to ILJ
+        register_rest_route($this->namespace, '/ilj/keywords', [
+            'methods' => 'POST',
+            'callback' => [$this, 'push_ilj_keywords'],
+            'permission_callback' => [$this, 'check_api_key'],
+            'args' => [
+                'post_id' => [
+                    'required' => true,
+                    'sanitize_callback' => 'absint',
+                ],
+            ],
+        ]);
     }
 
     /**
@@ -280,6 +321,8 @@ class Superman_Links_API {
             'yoast_active' => $this->is_yoast_active(),
             'elementor_active' => $this->is_elementor_active(),
             'elementor_version' => $this->get_elementor_version(),
+            'ilj_active' => $this->is_ilj_active(),
+            'ilj_version' => defined('ILJ_VERSION') ? ILJ_VERSION : null,
         ]);
     }
 
@@ -1499,5 +1542,196 @@ class Superman_Links_API {
                 error_log('Superman Links: Failed to regenerate Elementor CSS - ' . $e->getMessage());
             }
         }
+    }
+
+    // ==========================================
+    // Internal Link Juicer (ILJ) Integration
+    // ==========================================
+
+    /**
+     * Check if Internal Link Juicer is active
+     */
+    private function is_ilj_active() {
+        return defined('ILJ_VERSION') || is_plugin_active('internal-links/wp-internal-linkjuicer.php');
+    }
+
+    /**
+     * GET /ilj/status — Check ILJ installation status
+     */
+    public function get_ilj_status($request) {
+        $active = $this->is_ilj_active();
+        $version = defined('ILJ_VERSION') ? ILJ_VERSION : null;
+        $index_count = 0;
+        $configured_posts = 0;
+
+        if ($active) {
+            global $wpdb;
+
+            // Count link index entries
+            $table = $wpdb->prefix . 'ilj_linkindex';
+            $table_exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+            if ($table_exists) {
+                $index_count = (int) $wpdb->get_var("SELECT COUNT(*) FROM `{$table}`");
+            }
+
+            // Count posts with ILJ keywords configured
+            $configured_posts = (int) $wpdb->get_var(
+                "SELECT COUNT(DISTINCT post_id) FROM {$wpdb->postmeta} WHERE meta_key = 'ilj_linkdefinition'"
+            );
+        }
+
+        return rest_ensure_response([
+            'installed' => $active,
+            'active' => $active,
+            'version' => $version,
+            'index_count' => $index_count,
+            'configured_posts' => $configured_posts,
+        ]);
+    }
+
+    /**
+     * GET /ilj/index — Read ILJ link index with resolved URLs
+     */
+    public function get_ilj_index($request) {
+        if (!$this->is_ilj_active()) {
+            return new WP_Error(
+                'ilj_not_active',
+                __('Internal Link Juicer is not installed or active.', 'superman-links'),
+                ['status' => 400]
+            );
+        }
+
+        global $wpdb;
+        $table = $wpdb->prefix . 'ilj_linkindex';
+
+        $table_exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+        if (!$table_exists) {
+            return new WP_Error(
+                'ilj_no_table',
+                __('ILJ link index table not found.', 'superman-links'),
+                ['status' => 400]
+            );
+        }
+
+        $per_page = min($request->get_param('per_page'), 500);
+        $page = max($request->get_param('page'), 1);
+        $offset = ($page - 1) * $per_page;
+
+        $total = (int) $wpdb->get_var("SELECT COUNT(*) FROM `{$table}`");
+        $total_pages = ceil($total / $per_page);
+
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT id, link_from, link_to, type_from, type_to, anchor FROM `{$table}` ORDER BY id ASC LIMIT %d OFFSET %d",
+                $per_page,
+                $offset
+            )
+        );
+
+        // Collect unique post IDs to resolve URLs in bulk
+        $post_ids = [];
+        foreach ($rows as $row) {
+            if ($row->type_from === 'post') $post_ids[] = (int) $row->link_from;
+            if ($row->type_to === 'post') $post_ids[] = (int) $row->link_to;
+        }
+        $post_ids = array_unique($post_ids);
+
+        // Build post ID → URL map
+        $url_map = [];
+        foreach ($post_ids as $pid) {
+            $permalink = get_permalink($pid);
+            if ($permalink) {
+                $url_map[$pid] = $permalink;
+            }
+        }
+
+        $links = [];
+        foreach ($rows as $row) {
+            $from_id = (int) $row->link_from;
+            $to_id = (int) $row->link_to;
+
+            $links[] = [
+                'link_from_id' => $from_id,
+                'link_from_url' => $url_map[$from_id] ?? null,
+                'link_to_id' => $to_id,
+                'link_to_url' => $url_map[$to_id] ?? null,
+                'anchor' => $row->anchor,
+                'type_from' => $row->type_from,
+                'type_to' => $row->type_to,
+            ];
+        }
+
+        return rest_ensure_response([
+            'links' => $links,
+            'total' => $total,
+            'current_page' => $page,
+            'total_pages' => (int) $total_pages,
+        ]);
+    }
+
+    /**
+     * POST /ilj/keywords — Push keywords to a post's ILJ configuration
+     */
+    public function push_ilj_keywords($request) {
+        if (!$this->is_ilj_active()) {
+            return new WP_Error(
+                'ilj_not_active',
+                __('Internal Link Juicer is not installed or active.', 'superman-links'),
+                ['status' => 400]
+            );
+        }
+
+        $post_id = $request->get_param('post_id');
+        $keywords = $request->get_param('keywords');
+
+        $post = get_post($post_id);
+        if (!$post || $post->post_status !== 'publish') {
+            return new WP_Error(
+                'not_found',
+                __('Post not found or not published.', 'superman-links'),
+                ['status' => 404]
+            );
+        }
+
+        if (!is_array($keywords) || empty($keywords)) {
+            return new WP_Error(
+                'invalid_keywords',
+                __('Keywords must be a non-empty array of strings.', 'superman-links'),
+                ['status' => 400]
+            );
+        }
+
+        // Sanitize keywords
+        $new_keywords = array_map('sanitize_text_field', $keywords);
+        $new_keywords = array_filter($new_keywords);
+
+        // Read existing ILJ keywords
+        $existing = get_post_meta($post_id, 'ilj_linkdefinition', true);
+        if (!is_array($existing)) {
+            $existing = [];
+        }
+
+        // Merge and deduplicate (case-insensitive)
+        $existing_lower = array_map('strtolower', $existing);
+        foreach ($new_keywords as $kw) {
+            if (!in_array(strtolower($kw), $existing_lower, true)) {
+                $existing[] = $kw;
+                $existing_lower[] = strtolower($kw);
+            }
+        }
+
+        update_post_meta($post_id, 'ilj_linkdefinition', $existing);
+
+        // Trigger ILJ index rebuild for this post if the action exists
+        if (has_action('ilj_after_keywords_update')) {
+            do_action('ilj_after_keywords_update', $post_id);
+        }
+
+        return rest_ensure_response([
+            'success' => true,
+            'post_id' => $post_id,
+            'keyword_count' => count($existing),
+            'keywords' => $existing,
+        ]);
     }
 }
