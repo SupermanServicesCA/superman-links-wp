@@ -196,6 +196,25 @@ class Superman_Links_API {
             'permission_callback' => [$this, 'check_api_key'],
         ]);
 
+        // LinkFinder endpoints
+        register_rest_route( $this->namespace, '/post-ids', [
+            'methods'             => 'GET',
+            'callback'            => [ $this, 'get_post_ids' ],
+            'permission_callback' => [ $this, 'check_api_key' ],
+        ] );
+
+        register_rest_route( $this->namespace, '/extract-content', [
+            'methods'             => 'POST',
+            'callback'            => [ $this, 'extract_content' ],
+            'permission_callback' => [ $this, 'check_api_key' ],
+            'args'                => [
+                'post_id' => [
+                    'required' => true,
+                    'type'     => 'integer',
+                ],
+            ],
+        ] );
+
         // ==========================================
         // Internal Links Endpoints
         // ==========================================
@@ -702,6 +721,183 @@ class Superman_Links_API {
     }
 
     /**
+     * Detect which page builder produced this post.
+     * Returns one of: elementor, gutenberg, classic, divi, wpbakery,
+     * beaver_builder, bricks, oxygen.
+     */
+    private function detect_builder( $post ) {
+        if ( get_post_meta( $post->ID, '_elementor_edit_mode', true ) === 'builder' ) {
+            return 'elementor';
+        }
+        if ( get_post_meta( $post->ID, '_fl_builder_enabled', true ) ) {
+            return 'beaver_builder';
+        }
+        if ( get_post_meta( $post->ID, '_bricks_page_content_2', true ) ) {
+            return 'bricks';
+        }
+        if ( get_post_meta( $post->ID, 'ct_builder_shortcodes', true ) ) {
+            return 'oxygen';
+        }
+        if ( strpos( $post->post_content, '[et_pb_section' ) !== false ) {
+            return 'divi';
+        }
+        if ( strpos( $post->post_content, '[vc_row' ) !== false ) {
+            return 'wpbakery';
+        }
+        if ( strpos( $post->post_content, '<!-- wp:' ) !== false ) {
+            return 'gutenberg';
+        }
+        return 'classic';
+    }
+
+    /**
+     * Parse rendered HTML into structured text + links.
+     * Returns: [ 'headings' => string[], 'paragraphs' => string[], 'links' => array, 'full_text' => string ]
+     */
+    private function parse_html_to_structured( $html, $base_url = '' ) {
+        if ( empty( $html ) ) {
+            return [
+                'headings'   => [],
+                'paragraphs' => [],
+                'links'      => [],
+                'full_text'  => '',
+            ];
+        }
+
+        // Suppress libxml warnings on imperfect HTML
+        $previous = libxml_use_internal_errors( true );
+        $doc      = new DOMDocument();
+        // UTF-8 hint
+        $doc->loadHTML( '<?xml encoding="UTF-8">' . $html );
+        libxml_clear_errors();
+        libxml_use_internal_errors( $previous );
+
+        $xpath = new DOMXPath( $doc );
+
+        // Strip non-content nodes
+        foreach ( $xpath->query( '//script | //style | //noscript | //nav | //header | //footer | //*[@aria-hidden="true"]' ) as $node ) {
+            $node->parentNode->removeChild( $node );
+        }
+
+        $headings   = [];
+        $paragraphs = [];
+        $links      = [];
+        $seen_para  = [];
+
+        // Headings
+        foreach ( $xpath->query( '//h1 | //h2 | //h3 | //h4 | //h5 | //h6' ) as $node ) {
+            $text = trim( preg_replace( '/\s+/', ' ', $node->textContent ) );
+            if ( $text !== '' ) {
+                $headings[] = $text;
+            }
+        }
+
+        // Paragraphs and list items
+        foreach ( $xpath->query( '//p | //li' ) as $node ) {
+            $text = trim( preg_replace( '/\s+/', ' ', $node->textContent ) );
+            if ( $text === '' || isset( $seen_para[ $text ] ) ) {
+                continue;
+            }
+            $seen_para[ $text ] = true;
+            $paragraphs[]       = $text;
+        }
+
+        // Links — capture url + anchor text + parent paragraph context
+        foreach ( $xpath->query( '//a[@href]' ) as $node ) {
+            $href = trim( $node->getAttribute( 'href' ) );
+            if ( $href === '' || strpos( $href, '#' ) === 0 || strpos( $href, 'javascript:' ) === 0 ) {
+                continue;
+            }
+            $anchor = trim( preg_replace( '/\s+/', ' ', $node->textContent ) );
+            if ( $anchor === '' ) {
+                continue;
+            }
+            // Resolve relative URLs
+            $url = $href;
+            if ( $base_url && ! preg_match( '/^https?:\/\//i', $url ) && strpos( $url, 'tel:' ) !== 0 && strpos( $url, 'mailto:' ) !== 0 ) {
+                $url = rtrim( $base_url, '/' ) . '/' . ltrim( $url, '/' );
+            }
+
+            // Walk up to find parent <p> or <li> for context
+            $context = '';
+            $parent  = $node->parentNode;
+            while ( $parent && ! in_array( strtolower( $parent->nodeName ), [ 'p', 'li', 'td', 'div', 'body' ], true ) ) {
+                $parent = $parent->parentNode;
+            }
+            if ( $parent ) {
+                $context = trim( preg_replace( '/\s+/', ' ', $parent->textContent ) );
+                if ( strlen( $context ) > 200 ) {
+                    $context = substr( $context, 0, 197 ) . '...';
+                }
+            }
+
+            $links[] = [
+                'url'     => $url,
+                'anchor'  => $anchor,
+                'context' => $context,
+            ];
+        }
+
+        $full_text = trim( implode( "\n", array_merge( $headings, $paragraphs ) ) );
+
+        return [
+            'headings'   => $headings,
+            'paragraphs' => $paragraphs,
+            'links'      => $links,
+            'full_text'  => $full_text,
+        ];
+    }
+
+    /**
+     * Render a post to HTML using whichever pipeline matches the builder.
+     * Always returns a string (empty on failure).
+     */
+    private function render_post_to_html( $post, $builder ) {
+        switch ( $builder ) {
+            case 'elementor':
+                // Elementor bypasses the_content; use its frontend renderer.
+                // If Elementor is unexpectedly missing, fall back to the_content path.
+                if ( class_exists( '\\Elementor\\Plugin' ) ) {
+                    $instance = \Elementor\Plugin::$instance;
+                    if ( $instance && isset( $instance->frontend ) ) {
+                        return $instance->frontend->get_builder_content_for_display( $post->ID );
+                    }
+                }
+                return apply_filters( 'the_content', $post->post_content );
+
+            case 'gutenberg':
+            case 'classic':
+            case 'divi':
+            case 'wpbakery':
+            case 'beaver_builder':
+                // WordPress core handles all shortcode/block-based builders
+                return apply_filters( 'the_content', $post->post_content );
+
+            case 'bricks':
+            case 'oxygen':
+            default:
+                // Universal fallback: fetch the rendered live URL via internal request
+                $response = wp_remote_get( get_permalink( $post->ID ), [
+                    'timeout'   => 15,
+                    'sslverify' => false,
+                    'headers'   => [ 'X-Superman-Internal' => '1' ],
+                ] );
+                if ( is_wp_error( $response ) ) {
+                    return '';
+                }
+                $body = wp_remote_retrieve_body( $response );
+                // Crude main-content extraction: prefer <main> > <article> > .entry-content > full body
+                if ( preg_match( '/<main\b[^>]*>(.*?)<\/main>/is', $body, $m ) ) {
+                    return $m[1];
+                }
+                if ( preg_match( '/<article\b[^>]*>(.*?)<\/article>/is', $body, $m ) ) {
+                    return $m[1];
+                }
+                return $body;
+        }
+    }
+
+    /**
      * Get all Elementor-built pages
      */
     public function get_elementor_pages($request) {
@@ -1054,6 +1250,75 @@ class Superman_Links_API {
                 update_post_meta($post_id, 'rank_math_description', sanitize_textarea_field($seo_data['meta_description']));
             }
         }
+    }
+
+    // ==========================================
+    // LinkFinder Methods
+    // ==========================================
+
+    /**
+     * Return all published post + page IDs (no content, lightweight).
+     * Used by LinkFinder bulk enqueue to schedule extraction jobs.
+     */
+    public function get_post_ids( $request ) {
+        $query = new WP_Query( [
+            'post_type'      => [ 'post', 'page' ],
+            'post_status'    => 'publish',
+            'posts_per_page' => -1,
+            'fields'         => 'ids',
+            'no_found_rows'  => true,
+        ] );
+
+        $ids = array_map( 'intval', $query->posts );
+        wp_reset_postdata();
+
+        return rest_ensure_response( [
+            'post_ids' => array_values( $ids ),
+            'total'    => count( $ids ),
+        ] );
+    }
+
+    /**
+     * Extract structured content from a single post for LinkFinder.
+     * Renders the post via the appropriate builder pipeline, then parses HTML.
+     */
+    public function extract_content( $request ) {
+        $post_id = (int) $request->get_param( 'post_id' );
+        $post    = get_post( $post_id );
+
+        if ( ! $post || $post->post_status !== 'publish' ) {
+            return new WP_Error(
+                'not_found',
+                __( 'Post not found or not published.', 'superman-links' ),
+                [ 'status' => 404 ]
+            );
+        }
+
+        $builder = $this->detect_builder( $post );
+        $html    = $this->render_post_to_html( $post, $builder );
+
+        $site_url = get_site_url();
+        $parsed   = $this->parse_html_to_structured( $html, $site_url );
+
+        // Prepend the post title as the first heading if not already present
+        $title = get_the_title( $post_id );
+        if ( $title && ( empty( $parsed['headings'] ) || $parsed['headings'][0] !== $title ) ) {
+            array_unshift( $parsed['headings'], $title );
+            $parsed['full_text'] = $title . "\n" . $parsed['full_text'];
+        }
+
+        return rest_ensure_response( [
+            'post_id'       => $post_id,
+            'post_url'      => get_permalink( $post_id ),
+            'post_title'    => $title,
+            'post_modified' => mysql_to_rfc3339( $post->post_modified_gmt ),
+            'builder'       => $builder,
+            'headings'      => $parsed['headings'],
+            'paragraphs'    => $parsed['paragraphs'],
+            'links'         => $parsed['links'],
+            'full_text'     => $parsed['full_text'],
+            'content_hash'  => md5( $post->post_modified_gmt . '|' . substr( $html, 0, 50000 ) ),
+        ] );
     }
 
     // ==========================================
