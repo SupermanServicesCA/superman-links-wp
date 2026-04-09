@@ -19,6 +19,21 @@ class Superman_Links_API {
 
         // Add CORS headers to REST responses
         add_filter('rest_pre_serve_request', [$this, 'add_cors_headers'], 15, 3);
+
+        // LinkFinder push: hook save_post to schedule a delayed push event
+        add_action('save_post', [$this, 'on_post_save_linkfinder_push'], 20, 3);
+        add_action('superman_linkfinder_push_event', [$this, 'linkfinder_push_post']);
+
+        // LinkFinder bulk push: WP-Cron tick handler
+        add_action('superman_linkfinder_bulk_push_tick', [$this, 'linkfinder_bulk_push_tick']);
+
+        // WP-Cron doesn't have a "every minute" schedule by default
+        add_filter('cron_schedules', function ($schedules) {
+            if (!isset($schedules['minute'])) {
+                $schedules['minute'] = ['interval' => 60, 'display' => __('Every Minute')];
+            }
+            return $schedules;
+        });
     }
 
     /**
@@ -196,24 +211,27 @@ class Superman_Links_API {
             'permission_callback' => [$this, 'check_api_key'],
         ]);
 
-        // LinkFinder endpoints
-        register_rest_route( $this->namespace, '/post-ids', [
-            'methods'             => 'GET',
-            'callback'            => [ $this, 'get_post_ids' ],
-            'permission_callback' => [ $this, 'check_api_key' ],
-        ] );
-
-        register_rest_route( $this->namespace, '/extract-content', [
+        // LinkFinder bulk push admin endpoints
+        register_rest_route($this->namespace, '/linkfinder/start', [
             'methods'             => 'POST',
-            'callback'            => [ $this, 'extract_content' ],
-            'permission_callback' => [ $this, 'check_api_key' ],
-            'args'                => [
-                'post_id' => [
-                    'required' => true,
-                    'type'     => 'integer',
-                ],
-            ],
-        ] );
+            'callback'            => [$this, 'rest_linkfinder_start'],
+            'permission_callback' => [$this, 'check_admin_or_api_key'],
+        ]);
+        register_rest_route($this->namespace, '/linkfinder/stop', [
+            'methods'             => 'POST',
+            'callback'            => [$this, 'rest_linkfinder_stop'],
+            'permission_callback' => [$this, 'check_admin_or_api_key'],
+        ]);
+        register_rest_route($this->namespace, '/linkfinder/status', [
+            'methods'             => 'GET',
+            'callback'            => [$this, 'rest_linkfinder_status'],
+            'permission_callback' => [$this, 'check_admin_or_api_key'],
+        ]);
+        register_rest_route($this->namespace, '/linkfinder/tick', [
+            'methods'             => 'POST',
+            'callback'            => [$this, 'rest_linkfinder_tick'],
+            'permission_callback' => [$this, 'check_admin_or_api_key'],
+        ]);
 
         // ==========================================
         // Internal Links Endpoints
@@ -1253,72 +1271,272 @@ class Superman_Links_API {
     }
 
     // ==========================================
-    // LinkFinder Methods
+    // LinkFinder Push Methods (v1.6.0+)
     // ==========================================
 
     /**
-     * Return all published post + page IDs (no content, lightweight).
-     * Used by LinkFinder bulk enqueue to schedule extraction jobs.
+     * Permission callback that allows EITHER an authenticated WP admin OR
+     * a valid Superman Links API key. Used by the bulk push admin endpoints.
      */
-    public function get_post_ids( $request ) {
-        $query = new WP_Query( [
-            'post_type'      => [ 'post', 'page' ],
+    public function check_admin_or_api_key($request) {
+        if (current_user_can('manage_options')) {
+            return true;
+        }
+        return $this->check_api_key($request);
+    }
+
+    /**
+     * Run extraction locally for one post and POST the structured payload to
+     * the Supabase wordpress-webhook endpoint. Returns true on 2xx, false otherwise.
+     *
+     * If $session_id is provided, the webhook treats this as part of an active
+     * bulk push session and bumps the sync counters.
+     */
+    public function linkfinder_push_post($post_id, $session_id = null) {
+        $post = get_post($post_id);
+        if (!$post || $post->post_status !== 'publish') {
+            return false;
+        }
+        if (!in_array($post->post_type, ['post', 'page'], true)) {
+            return false;
+        }
+
+        $webhook_url  = get_option('superman_links_webhook_url');
+        $api_key      = get_option('superman_links_api_key');
+        $supabase_key = get_option('superman_links_supabase_key');
+        if (!$webhook_url || !$api_key) {
+            return false;
+        }
+
+        $builder  = $this->detect_builder($post);
+        $html     = $this->render_post_to_html($post, $builder);
+        $site_url = get_site_url();
+        $parsed   = $this->parse_html_to_structured($html, $site_url);
+
+        $title = get_the_title($post_id);
+        if ($title && (empty($parsed['headings']) || $parsed['headings'][0] !== $title)) {
+            array_unshift($parsed['headings'], $title);
+            $parsed['full_text'] = $title . "\n" . $parsed['full_text'];
+        }
+
+        $payload = [
+            'action'   => 'linkfinder_page_push',
+            'site_url' => $site_url,
+            'api_key'  => $api_key,
+            'post'     => [
+                'id'           => $post_id,
+                'url'          => get_permalink($post_id),
+                'title'        => $title,
+                'modified_at'  => mysql_to_rfc3339($post->post_modified_gmt),
+                'builder'      => $builder,
+                'headings'     => $parsed['headings'],
+                'paragraphs'   => $parsed['paragraphs'],
+                'links'        => $parsed['links'],
+                'full_text'    => $parsed['full_text'],
+                'content_hash' => md5($post->post_modified_gmt . '|' . substr($html, 0, 50000)),
+            ],
+        ];
+        if ($session_id) {
+            $payload['session_id'] = $session_id;
+        }
+
+        $headers = ['Content-Type' => 'application/json'];
+        if ($supabase_key) {
+            $headers['apikey']        = $supabase_key;
+            $headers['Authorization'] = 'Bearer ' . $supabase_key;
+        }
+
+        $response = wp_remote_post($webhook_url, [
+            'method'  => 'POST',
+            'timeout' => 30,
+            'headers' => $headers,
+            'body'    => wp_json_encode($payload),
+        ]);
+
+        if (is_wp_error($response)) {
+            error_log('[Superman LinkFinder] push failed: ' . $response->get_error_message());
+            return false;
+        }
+
+        $code = wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            $body = wp_remote_retrieve_body($response);
+            error_log('[Superman LinkFinder] push failed: HTTP ' . $code . ' — ' . substr($body, 0, 500));
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * On every post save, schedule a delayed LinkFinder push (debounced via
+     * WP-Cron — multiple saves of the same post within 5 sec collapse to one event).
+     */
+    public function on_post_save_linkfinder_push($post_id, $post, $update) {
+        if (wp_is_post_revision($post_id) || wp_is_post_autosave($post_id)) {
+            return;
+        }
+        if ($post->post_status !== 'publish') {
+            return;
+        }
+        if (!in_array($post->post_type, ['post', 'page'], true)) {
+            return;
+        }
+        if (!get_option('superman_links_webhook_url')) {
+            return;
+        }
+
+        // wp_schedule_single_event dedupes identical (hook + args) within the
+        // same window, so rapid saves of the same post collapse automatically.
+        if (!wp_next_scheduled('superman_linkfinder_push_event', [$post_id])) {
+            wp_schedule_single_event(time() + 5, 'superman_linkfinder_push_event', [$post_id]);
+        }
+    }
+
+    /**
+     * Send a bulk session signal (start/complete) to the Supabase webhook.
+     */
+    private function push_bulk_signal($action, $session_id, $extra) {
+        $webhook_url  = get_option('superman_links_webhook_url');
+        $api_key      = get_option('superman_links_api_key');
+        $supabase_key = get_option('superman_links_supabase_key');
+        if (!$webhook_url || !$api_key) {
+            return;
+        }
+
+        $payload = array_merge([
+            'action'     => $action,
+            'site_url'   => get_site_url(),
+            'api_key'    => $api_key,
+            'session_id' => $session_id,
+        ], $extra);
+
+        $headers = ['Content-Type' => 'application/json'];
+        if ($supabase_key) {
+            $headers['apikey']        = $supabase_key;
+            $headers['Authorization'] = 'Bearer ' . $supabase_key;
+        }
+
+        wp_remote_post($webhook_url, [
+            'method'  => 'POST',
+            'timeout' => 15,
+            'headers' => $headers,
+            'body'    => wp_json_encode($payload),
+        ]);
+    }
+
+    /**
+     * Start a bulk push session. Reads all published post + page IDs into a
+     * persistent queue and schedules the recurring tick.
+     */
+    public function linkfinder_bulk_push_start() {
+        $query = new WP_Query([
+            'post_type'      => ['post', 'page'],
             'post_status'    => 'publish',
             'posts_per_page' => -1,
             'fields'         => 'ids',
             'no_found_rows'  => true,
-        ] );
-
-        $ids = array_map( 'intval', $query->posts );
+        ]);
+        $post_ids = array_map('intval', $query->posts);
         wp_reset_postdata();
 
-        return rest_ensure_response( [
-            'post_ids' => array_values( $ids ),
-            'total'    => count( $ids ),
-        ] );
+        $session_id = wp_generate_uuid4();
+        $queue = [
+            'session_id' => $session_id,
+            'post_ids'   => array_values($post_ids),
+            'total'      => count($post_ids),
+            'done'       => 0,
+            'started_at' => time(),
+        ];
+        update_option('superman_linkfinder_push_queue', $queue, false);
+
+        // Notify Supabase: bulk start
+        $this->push_bulk_signal('linkfinder_bulk_start', $session_id, ['total' => $queue['total']]);
+
+        // Schedule recurring tick
+        if (!wp_next_scheduled('superman_linkfinder_bulk_push_tick')) {
+            wp_schedule_event(time() + 5, 'minute', 'superman_linkfinder_bulk_push_tick');
+        }
+
+        return $queue;
     }
 
     /**
-     * Extract structured content from a single post for LinkFinder.
-     * Renders the post via the appropriate builder pipeline, then parses HTML.
+     * Process up to 30 pages from the bulk push queue. Called by WP-Cron AND
+     * by the admin page JS polling (so the queue keeps moving even if WP-Cron stalls).
      */
-    public function extract_content( $request ) {
-        $post_id = (int) $request->get_param( 'post_id' );
-        $post    = get_post( $post_id );
-
-        if ( ! $post || $post->post_status !== 'publish' ) {
-            return new WP_Error(
-                'not_found',
-                __( 'Post not found or not published.', 'superman-links' ),
-                [ 'status' => 404 ]
-            );
+    public function linkfinder_bulk_push_tick() {
+        $queue = get_option('superman_linkfinder_push_queue');
+        if (!$queue || empty($queue['post_ids'])) {
+            wp_clear_scheduled_hook('superman_linkfinder_bulk_push_tick');
+            return;
         }
 
-        $builder = $this->detect_builder( $post );
-        $html    = $this->render_post_to_html( $post, $builder );
-
-        $site_url = get_site_url();
-        $parsed   = $this->parse_html_to_structured( $html, $site_url );
-
-        // Prepend the post title as the first heading if not already present
-        $title = get_the_title( $post_id );
-        if ( $title && ( empty( $parsed['headings'] ) || $parsed['headings'][0] !== $title ) ) {
-            array_unshift( $parsed['headings'], $title );
-            $parsed['full_text'] = $title . "\n" . $parsed['full_text'];
+        $batch = array_splice($queue['post_ids'], 0, 30);
+        foreach ($batch as $post_id) {
+            $this->linkfinder_push_post($post_id, $queue['session_id']);
+            usleep(200000); // 200ms between pushes
         }
+        $queue['done'] += count($batch);
+        update_option('superman_linkfinder_push_queue', $queue, false);
 
-        return rest_ensure_response( [
-            'post_id'       => $post_id,
-            'post_url'      => get_permalink( $post_id ),
-            'post_title'    => $title,
-            'post_modified' => mysql_to_rfc3339( $post->post_modified_gmt ),
-            'builder'       => $builder,
-            'headings'      => $parsed['headings'],
-            'paragraphs'    => $parsed['paragraphs'],
-            'links'         => $parsed['links'],
-            'full_text'     => $parsed['full_text'],
-            'content_hash'  => md5( $post->post_modified_gmt . '|' . substr( $html, 0, 50000 ) ),
-        ] );
+        if (empty($queue['post_ids'])) {
+            $this->push_bulk_signal('linkfinder_bulk_complete', $queue['session_id'], []);
+            delete_option('superman_linkfinder_push_queue');
+            wp_clear_scheduled_hook('superman_linkfinder_bulk_push_tick');
+        }
+    }
+
+    /**
+     * Manual stop — clear the queue and unschedule the tick.
+     */
+    public function linkfinder_bulk_push_stop() {
+        delete_option('superman_linkfinder_push_queue');
+        wp_clear_scheduled_hook('superman_linkfinder_bulk_push_tick');
+    }
+
+    /**
+     * Read the current queue state for the admin UI.
+     */
+    public function linkfinder_bulk_push_status() {
+        $queue = get_option('superman_linkfinder_push_queue');
+        if (!$queue) {
+            return ['status' => 'idle'];
+        }
+        return [
+            'status'     => empty($queue['post_ids']) ? 'completing' : 'in_progress',
+            'session_id' => $queue['session_id'],
+            'total'      => $queue['total'],
+            'done'       => $queue['done'],
+            'remaining'  => count($queue['post_ids']),
+            'started_at' => $queue['started_at'],
+        ];
+    }
+
+    // REST endpoints for the admin page bulk push controls
+
+    public function rest_linkfinder_start($request) {
+        $queue = $this->linkfinder_bulk_push_start();
+        return rest_ensure_response([
+            'session_id' => $queue['session_id'],
+            'total'      => $queue['total'],
+        ]);
+    }
+
+    public function rest_linkfinder_stop($request) {
+        $this->linkfinder_bulk_push_stop();
+        return rest_ensure_response(['ok' => true]);
+    }
+
+    public function rest_linkfinder_status($request) {
+        return rest_ensure_response($this->linkfinder_bulk_push_status());
+    }
+
+    public function rest_linkfinder_tick($request) {
+        // Manual tick called from the admin page JS polling — keeps the queue
+        // moving even if WP-Cron is unreliable.
+        $this->linkfinder_bulk_push_tick();
+        return rest_ensure_response($this->linkfinder_bulk_push_status());
     }
 
     // ==========================================
