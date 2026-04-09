@@ -126,7 +126,7 @@ class Superman_Links_Settings {
     public function render_linkfinder_section() {
         ?>
         <hr style="margin: 2em 0;" />
-        <h2>LinkFinder Sync</h2>
+        <h2 id="linkfinder-sync">LinkFinder Sync</h2>
         <p>
             Push all published pages to Superman Links CRM for anchor text search.
             Pages saved going forward sync automatically &mdash; only run this for the
@@ -205,7 +205,30 @@ class Superman_Links_Settings {
                 refresh();
             });
 
-            refresh();
+            // CRM-triggered re-sync: if URL has #auto-push=1, scroll the section
+            // into view AND auto-click Start (only if no sync is currently active).
+            // The CRM "Re-sync All Pages" button deep-links here with this hash.
+            async function maybeAutoStart() {
+                if (!window.location.hash.includes('auto-push=1')) return;
+
+                // Scroll the section into view so the user sees the progress immediately
+                document.getElementById('linkfinder-sync')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+                // Wait for the initial status check to settle
+                try {
+                    const status = await api('/linkfinder/status');
+                    if (status.status === 'idle') {
+                        await api('/linkfinder/start', 'POST');
+                        // Strip the hash so a refresh doesn't re-trigger
+                        history.replaceState(null, '', window.location.pathname + window.location.search);
+                        refresh();
+                    }
+                } catch (e) {
+                    console.warn('LinkFinder auto-push failed:', e);
+                }
+            }
+
+            refresh().then(maybeAutoStart);
         })();
         </script>
         <?php
