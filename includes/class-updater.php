@@ -64,6 +64,12 @@ class Superman_Links_Updater {
 
     /**
      * Check if an update is available
+     *
+     * Populates BOTH $transient->response (when an update is available) and
+     * $transient->no_update (when current). WordPress 5.5+ requires the
+     * plugin to appear in one of these for the auto-update toggle to render
+     * on the Plugins screen — otherwise WP treats us as outside the update
+     * system and hides the control.
      */
     public function check_for_update($transient) {
         if (empty($transient->checked)) {
@@ -79,19 +85,28 @@ class Superman_Links_Updater {
         // Strip 'v' prefix from tag (e.g., v1.3.0 -> 1.3.0)
         $latest_version = ltrim($release->tag_name, 'v');
         $current_version = SUPERMAN_LINKS_VERSION;
+        $download_url = $this->get_download_url($release);
 
-        if (version_compare($latest_version, $current_version, '>')) {
-            $download_url = $this->get_download_url($release);
+        $item = (object) [
+            'id' => 'github.com/' . $this->github_repo,
+            'slug' => 'superman-links-wp',
+            'plugin' => $this->plugin_slug,
+            'new_version' => $latest_version,
+            'url' => 'https://github.com/' . $this->github_repo,
+            'package' => $download_url ?: '',
+            'icons' => [],
+            'banners' => [],
+            'banners_rtl' => [],
+            'tested' => '6.7',
+            'requires_php' => '7.4',
+            'compatibility' => new stdClass(),
+        ];
 
-            if ($download_url) {
-                $transient->response[$this->plugin_slug] = (object) [
-                    'slug' => 'superman-links-wp',
-                    'plugin' => $this->plugin_slug,
-                    'new_version' => $latest_version,
-                    'url' => 'https://github.com/' . $this->github_repo,
-                    'package' => $download_url,
-                ];
-            }
+        if (version_compare($latest_version, $current_version, '>') && $download_url) {
+            $transient->response[$this->plugin_slug] = $item;
+        } else {
+            // Mark as current so the auto-update toggle is shown.
+            $transient->no_update[$this->plugin_slug] = $item;
         }
 
         return $transient;

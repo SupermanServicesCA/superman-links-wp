@@ -272,6 +272,10 @@ class Superman_Links_API {
                     'required' => true,
                     'sanitize_callback' => 'sanitize_text_field',
                 ],
+                'match_context' => [
+                    'required' => false,
+                    'sanitize_callback' => 'sanitize_textarea_field',
+                ],
             ],
         ]);
 
@@ -1632,6 +1636,7 @@ class Superman_Links_API {
         $source_post_id = $request->get_param('source_post_id');
         $target_url = $request->get_param('target_url');
         $anchor_text = $request->get_param('anchor_text');
+        $match_context = $request->get_param('match_context');
 
         $post = get_post($source_post_id);
         if (!$post || $post->post_status !== 'publish') {
@@ -1661,9 +1666,9 @@ class Superman_Links_API {
         }
 
         if ($is_elementor) {
-            $result = $this->insert_link_elementor($source_post_id, $target_url, $anchor_text);
+            $result = $this->insert_link_elementor($source_post_id, $target_url, $anchor_text, $match_context);
         } else {
-            $result = $this->insert_link_standard($source_post_id, $target_url, $anchor_text);
+            $result = $this->insert_link_standard($source_post_id, $target_url, $anchor_text, $match_context);
         }
 
         if (is_wp_error($result)) {
@@ -1676,7 +1681,163 @@ class Superman_Links_API {
             'target_url' => $target_url,
             'anchor_text' => $anchor_text,
             'is_elementor' => $is_elementor,
+            'mode' => is_array($result) && isset($result['mode']) ? $result['mode'] : 'append',
         ]);
+    }
+
+    /**
+     * Normalize whitespace for fuzzy text matching: collapse runs of
+     * whitespace to a single space and trim. Used to align extracted plain
+     * text against indexed sentence context.
+     */
+    private function normalize_whitespace($text) {
+        return trim(preg_replace('/\s+/u', ' ', (string) $text));
+    }
+
+    /**
+     * Wrap the first occurrence of $anchor_text in $html with an <a> tag,
+     * scoped to the region of $html whose plain-text contains $context.
+     *
+     * Returns the modified HTML on success or null if either the context
+     * or the anchor could not be located. Operates over text nodes only,
+     * so existing tags/attributes are never corrupted.
+     */
+    private function wrap_anchor_in_html($html, $context, $anchor_text, $target_url) {
+        if (empty($html) || empty($anchor_text)) {
+            return null;
+        }
+
+        $doc = new DOMDocument();
+        libxml_use_internal_errors(true);
+        // Wrap to give DOMDocument a single root + force UTF-8 handling.
+        $loaded = $doc->loadHTML(
+            '<?xml encoding="UTF-8"?><div id="superman-root">' . $html . '</div>',
+            LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD
+        );
+        libxml_clear_errors();
+        if (!$loaded) {
+            return null;
+        }
+
+        $root = $doc->getElementById('superman-root');
+        if (!$root) {
+            $root = $doc->documentElement;
+        }
+
+        // Walk all text nodes, building a flat plain-text string and tracking
+        // (node, offset_in_node) for each character so we can map back.
+        $text_nodes = [];
+        $flat = '';
+        $map  = []; // index in $flat -> [node_index, offset_in_node]
+        $xpath = new DOMXPath($doc);
+        $nodes = $xpath->query('.//text()', $root);
+        foreach ($nodes as $node) {
+            // Skip text inside existing <a> tags — never nest links.
+            $skip = false;
+            for ($p = $node->parentNode; $p && $p !== $root; $p = $p->parentNode) {
+                if ($p->nodeName === 'a') { $skip = true; break; }
+            }
+            if ($skip) continue;
+
+            $text_nodes[] = $node;
+            $idx = count($text_nodes) - 1;
+            $value = $node->nodeValue;
+            $len = strlen($value);
+            for ($i = 0; $i < $len; $i++) {
+                $map[strlen($flat) + $i] = [$idx, $i];
+            }
+            $flat .= $value;
+        }
+
+        if ($flat === '') {
+            return null;
+        }
+
+        // Search the flat plain-text using a whitespace-tolerant regex so
+        // line breaks / multiple spaces between words don't kill the match.
+        // We track byte offsets back to the original $flat positions.
+
+        $build_pattern = function ($needle) {
+            $needle_norm = $this->normalize_whitespace($needle);
+            if ($needle_norm === '') return null;
+            $tokens = preg_split('/\s+/u', $needle_norm);
+            $escaped = array_map(function ($t) { return preg_quote($t, '/'); }, $tokens);
+            return '/' . implode('\s+', $escaped) . '/iu';
+        };
+
+        $context_norm = $this->normalize_whitespace($context);
+        $context_start = -1;
+        $context_end = -1;
+        if ($context_norm !== '') {
+            $pattern = $build_pattern($context_norm);
+            if ($pattern && preg_match($pattern, $flat, $m, PREG_OFFSET_CAPTURE)) {
+                $context_start = $m[0][1];
+                $context_end = $context_start + strlen($m[0][0]);
+            }
+        }
+
+        if ($context_norm !== '' && $context_start === -1) {
+            // Strict mode: caller required context but it isn't on the page
+            return null;
+        }
+
+        // Search for the anchor text — within the context range if we have
+        // one, otherwise in the entire flat string.
+        $haystack = $flat;
+        $offset = 0;
+        if ($context_start !== -1) {
+            $haystack = substr($flat, $context_start, $context_end - $context_start);
+            $offset = $context_start;
+        }
+        $anchor_pattern = $build_pattern($anchor_text);
+        if (!$anchor_pattern || !preg_match($anchor_pattern, $haystack, $m, PREG_OFFSET_CAPTURE)) {
+            return null;
+        }
+        $anchor_start = $offset + $m[0][1];
+        $anchor_end   = $anchor_start + strlen($m[0][0]);
+        $matched_text = substr($flat, $anchor_start, $anchor_end - $anchor_start);
+
+        // Map start/end back to (text_node, char offset). Both endpoints must
+        // land inside text nodes that are in $map.
+        if (!isset($map[$anchor_start]) || !isset($map[$anchor_end - 1])) {
+            return null;
+        }
+        list($start_node_idx, $start_off) = $map[$anchor_start];
+        list($end_node_idx, $end_off) = $map[$anchor_end - 1];
+        $end_off += 1; // exclusive end
+
+        // We only handle the case where the anchor sits inside a single text
+        // node (overwhelmingly the common case). If the match spans multiple
+        // text nodes (e.g. <strong> in the middle), bail out gracefully.
+        if ($start_node_idx !== $end_node_idx) {
+            return null;
+        }
+
+        $node = $text_nodes[$start_node_idx];
+        $original = $node->nodeValue;
+        $before = substr($original, 0, $start_off);
+        $after  = substr($original, $end_off);
+
+        // Build the replacement: text-before + <a>matched_text</a> + text-after
+        $parent = $node->parentNode;
+        if ($before !== '') {
+            $parent->insertBefore($doc->createTextNode($before), $node);
+        }
+        $a = $doc->createElement('a');
+        $a->setAttribute('href', $target_url);
+        $a->appendChild($doc->createTextNode($matched_text));
+        $parent->insertBefore($a, $node);
+        if ($after !== '') {
+            $parent->insertBefore($doc->createTextNode($after), $node);
+        }
+        $parent->removeChild($node);
+
+        // Serialize the contents of #superman-root back to HTML.
+        $out = '';
+        foreach ($root->childNodes as $child) {
+            $out .= $doc->saveHTML($child);
+        }
+        return $out;
     }
 
     /**
@@ -1921,8 +2082,31 @@ class Superman_Links_API {
     /**
      * Insert a link into a standard (non-Elementor) page
      */
-    private function insert_link_standard($post_id, $target_url, $anchor_text) {
+    private function insert_link_standard($post_id, $target_url, $anchor_text, $match_context = null) {
         $post = get_post($post_id);
+
+        // Try in-place wrap first when caller provided sentence context
+        if (!empty($match_context)) {
+            $wrapped = $this->wrap_anchor_in_html($post->post_content, $match_context, $anchor_text, $target_url);
+            if ($wrapped !== null) {
+                $result = wp_update_post([
+                    'ID' => $post_id,
+                    'post_content' => $wrapped,
+                ], true);
+                if (is_wp_error($result)) {
+                    return $result;
+                }
+                return ['mode' => 'wrap'];
+            }
+            // Strict mode: context was provided but couldn't be located
+            return new WP_Error(
+                'context_not_found',
+                __('Could not find that sentence in the page content. The LinkFinder index may be stale — re-sync this site from the WordPress admin.', 'superman-links'),
+                ['status' => 422]
+            );
+        }
+
+        // No context: legacy "Related:" append behavior
         $link_html = sprintf(
             "\n" . '<p class="superman-internal-link">Related: <a href="%s">%s</a></p>',
             esc_url($target_url),
@@ -1938,24 +2122,40 @@ class Superman_Links_API {
             return $result;
         }
 
-        return true;
+        return ['mode' => 'append'];
     }
 
     /**
      * Insert a link into an Elementor page's last text-editor widget
      */
-    private function insert_link_elementor($post_id, $target_url, $anchor_text) {
+    private function insert_link_elementor($post_id, $target_url, $anchor_text, $match_context = null) {
         $elementor_data = get_post_meta($post_id, '_elementor_data', true);
 
         if (empty($elementor_data)) {
-            return $this->insert_link_standard($post_id, $target_url, $anchor_text);
+            return $this->insert_link_standard($post_id, $target_url, $anchor_text, $match_context);
         }
 
         $data = is_string($elementor_data) ? json_decode($elementor_data, true) : $elementor_data;
         if (!is_array($data)) {
-            return $this->insert_link_standard($post_id, $target_url, $anchor_text);
+            return $this->insert_link_standard($post_id, $target_url, $anchor_text, $match_context);
         }
 
+        // Try in-place wrap first when caller provided sentence context
+        if (!empty($match_context)) {
+            $wrapped = $this->wrap_in_elementor_text_editors($data, $match_context, $anchor_text, $target_url);
+            if ($wrapped) {
+                update_post_meta($post_id, '_elementor_data', wp_json_encode($data));
+                $this->regenerate_elementor_css($post_id);
+                return ['mode' => 'wrap'];
+            }
+            return new WP_Error(
+                'context_not_found',
+                __('Could not find that sentence in the Elementor content. The LinkFinder index may be stale — re-sync this site from the WordPress admin.', 'superman-links'),
+                ['status' => 422]
+            );
+        }
+
+        // No context: legacy append-to-last-text-editor behavior
         $link_html = sprintf(
             '<p class="superman-internal-link">Related: <a href="%s">%s</a></p>',
             esc_url($target_url),
@@ -1965,17 +2165,39 @@ class Superman_Links_API {
         $modified = $this->append_to_last_text_editor($data, $link_html);
 
         if (!$modified) {
-            // No text-editor widget found, fall back to post_content
-            return $this->insert_link_standard($post_id, $target_url, $anchor_text);
+            return $this->insert_link_standard($post_id, $target_url, $anchor_text, $match_context);
         }
 
-        // Save updated Elementor data
         update_post_meta($post_id, '_elementor_data', wp_json_encode($data));
-
-        // Regenerate CSS
         $this->regenerate_elementor_css($post_id);
 
-        return true;
+        return ['mode' => 'append'];
+    }
+
+    /**
+     * Walk Elementor element tree and try to wrap the anchor inside the
+     * first text-editor widget whose HTML contains the context. Mutates
+     * $elements in place. Returns true on first successful wrap.
+     */
+    private function wrap_in_elementor_text_editors(&$elements, $context, $anchor_text, $target_url) {
+        if (!is_array($elements)) return false;
+        foreach ($elements as &$el) {
+            if (!is_array($el)) continue;
+            if (!empty($el['elements'])) {
+                if ($this->wrap_in_elementor_text_editors($el['elements'], $context, $anchor_text, $target_url)) {
+                    return true;
+                }
+            }
+            if (isset($el['widgetType']) && $el['widgetType'] === 'text-editor') {
+                $editor_html = $el['settings']['editor'] ?? '';
+                $wrapped = $this->wrap_anchor_in_html($editor_html, $context, $anchor_text, $target_url);
+                if ($wrapped !== null) {
+                    $el['settings']['editor'] = $wrapped;
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
