@@ -279,6 +279,23 @@ class Superman_Links_API {
             ],
         ]);
 
+        // DELETE /internal-links — unwrap an existing anchor by target URL
+        register_rest_route($this->namespace, '/internal-links', [
+            'methods' => 'DELETE',
+            'callback' => [$this, 'delete_internal_link'],
+            'permission_callback' => [$this, 'check_api_key'],
+            'args' => [
+                'source_post_id' => [
+                    'required' => true,
+                    'sanitize_callback' => 'absint',
+                ],
+                'target_url' => [
+                    'required' => true,
+                    'sanitize_callback' => 'esc_url_raw',
+                ],
+            ],
+        ]);
+
         // ==========================================
         // Internal Link Juicer (ILJ) Integration
         // ==========================================
@@ -1683,6 +1700,183 @@ class Superman_Links_API {
             'is_elementor' => $is_elementor,
             'mode' => is_array($result) && isset($result['mode']) ? $result['mode'] : 'append',
         ]);
+    }
+
+    /**
+     * DELETE /internal-links — unwrap an <a> tag matching target_url.
+     *
+     * Walks the post HTML (or Elementor text-editor widgets), finds the
+     * first <a href="$target_url"> element, and replaces it with its inner
+     * text content. Saving the post fires save_post → wordpress-webhook
+     * → wp_page_content re-index, which the CRM uses to confirm removal.
+     *
+     * Returns 200 on success, 404 with code=link_not_found if no matching
+     * anchor was located (CRM treats this as "needs manual review").
+     */
+    public function delete_internal_link($request) {
+        $source_post_id = $request->get_param('source_post_id');
+        $target_url = $request->get_param('target_url');
+
+        $post = get_post($source_post_id);
+        if (!$post || $post->post_status !== 'publish') {
+            return new WP_Error(
+                'not_found',
+                __('Source post not found.', 'superman-links'),
+                ['status' => 404]
+            );
+        }
+
+        $is_elementor = $this->is_elementor_post($source_post_id);
+        $unwrapped_anywhere = false;
+
+        if ($is_elementor) {
+            $elementor_data = get_post_meta($source_post_id, '_elementor_data', true);
+            if (!empty($elementor_data)) {
+                $data = is_string($elementor_data) ? json_decode($elementor_data, true) : $elementor_data;
+                if (is_array($data)) {
+                    if ($this->unwrap_in_elementor_text_editors($data, $target_url)) {
+                        update_post_meta($source_post_id, '_elementor_data', wp_json_encode($data));
+                        $this->regenerate_elementor_css($source_post_id);
+                        $unwrapped_anywhere = true;
+                    }
+                }
+            }
+        }
+
+        // Always also try post_content (Elementor pages may also have legacy
+        // post_content, e.g. our previous "Related:" appends).
+        if (!empty($post->post_content)) {
+            $unwrapped_html = $this->unwrap_anchor_in_html($post->post_content, $target_url);
+            if ($unwrapped_html !== null) {
+                $result = wp_update_post([
+                    'ID' => $source_post_id,
+                    'post_content' => $unwrapped_html,
+                ], true);
+                if (is_wp_error($result)) {
+                    return $result;
+                }
+                $unwrapped_anywhere = true;
+            }
+        }
+
+        if (!$unwrapped_anywhere) {
+            return new WP_Error(
+                'link_not_found',
+                __('No anchor pointing to that URL was found in the page content. The link may have been removed manually.', 'superman-links'),
+                ['status' => 404]
+            );
+        }
+
+        return rest_ensure_response([
+            'success' => true,
+            'source_post_id' => $source_post_id,
+            'target_url' => $target_url,
+            'is_elementor' => $is_elementor,
+        ]);
+    }
+
+    /**
+     * Walk Elementor element tree, unwrapping the first matching anchor in
+     * any text-editor widget. Mutates $elements in place. Returns true on
+     * first successful unwrap.
+     */
+    private function unwrap_in_elementor_text_editors(&$elements, $target_url) {
+        if (!is_array($elements)) return false;
+        $unwrapped = false;
+        foreach ($elements as &$el) {
+            if (!is_array($el)) continue;
+            if (!empty($el['elements'])) {
+                if ($this->unwrap_in_elementor_text_editors($el['elements'], $target_url)) {
+                    $unwrapped = true;
+                    // Continue scanning siblings for additional matches in
+                    // case the same anchor was inserted in multiple widgets,
+                    // but for v1 we stop at first hit.
+                    return true;
+                }
+            }
+            if (isset($el['widgetType']) && $el['widgetType'] === 'text-editor') {
+                $editor_html = $el['settings']['editor'] ?? '';
+                $new_html = $this->unwrap_anchor_in_html($editor_html, $target_url);
+                if ($new_html !== null) {
+                    $el['settings']['editor'] = $new_html;
+                    return true;
+                }
+            }
+        }
+        return $unwrapped;
+    }
+
+    /**
+     * Unwrap the first <a href="$target_url"> in the given HTML by replacing
+     * the anchor element with a text node containing its inner text. Returns
+     * the modified HTML or null if no matching anchor was found.
+     */
+    private function unwrap_anchor_in_html($html, $target_url) {
+        if (empty($html)) return null;
+
+        $doc = new DOMDocument();
+        libxml_use_internal_errors(true);
+        $loaded = $doc->loadHTML(
+            '<?xml encoding="UTF-8"?><div id="superman-root">' . $html . '</div>',
+            LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD
+        );
+        libxml_clear_errors();
+        if (!$loaded) return null;
+
+        $root = $doc->getElementById('superman-root');
+        if (!$root) $root = $doc->documentElement;
+
+        $xpath = new DOMXPath($doc);
+        $anchors = $xpath->query('.//a[@href]', $root);
+        $target_norm = $this->normalize_url_for_compare($target_url);
+
+        $matched = null;
+        foreach ($anchors as $a) {
+            $href = $a->getAttribute('href');
+            if ($this->normalize_url_for_compare($href) === $target_norm) {
+                $matched = $a;
+                break;
+            }
+        }
+
+        if (!$matched) return null;
+
+        // Special case: if this <a> is the only child of a paragraph that
+        // looks like our legacy "Related:" insert, remove the whole <p>.
+        $parent = $matched->parentNode;
+        if (
+            $parent && $parent->nodeName === 'p' &&
+            $parent->getAttribute('class') === 'superman-internal-link'
+        ) {
+            $parent->parentNode->removeChild($parent);
+        } else {
+            // Replace the anchor with a text node of its inner text.
+            $text_content = $matched->textContent;
+            $text_node = $doc->createTextNode($text_content);
+            $matched->parentNode->replaceChild($text_node, $matched);
+        }
+
+        $out = '';
+        foreach ($root->childNodes as $child) {
+            $out .= $doc->saveHTML($child);
+        }
+        return $out;
+    }
+
+    /**
+     * Normalize a URL for comparison: lowercase host, strip trailing slash,
+     * strip www., preserve path + query.
+     */
+    private function normalize_url_for_compare($url) {
+        $parsed = parse_url($url);
+        if (!$parsed || empty($parsed['host'])) {
+            return strtolower(rtrim($url, '/'));
+        }
+        $host = strtolower(preg_replace('/^www\./', '', $parsed['host']));
+        $path = isset($parsed['path']) ? rtrim($parsed['path'], '/') : '';
+        if ($path === '') $path = '/';
+        $query = isset($parsed['query']) ? '?' . $parsed['query'] : '';
+        return $host . $path . $query;
     }
 
     /**
