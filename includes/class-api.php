@@ -51,7 +51,7 @@ class Superman_Links_API {
         }
 
         header('Access-Control-Allow-Origin: *');
-        header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+        header('Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS');
         header('Access-Control-Allow-Headers: X-Superman-Links-Key, Content-Type, Authorization');
         header('Access-Control-Max-Age: 86400');
         status_header(200);
@@ -63,7 +63,7 @@ class Superman_Links_API {
      */
     public function add_cors_headers($served, $result, $request) {
         header('Access-Control-Allow-Origin: *');
-        header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+        header('Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS');
         header('Access-Control-Allow-Headers: X-Superman-Links-Key, Content-Type, Authorization');
 
         return $served;
