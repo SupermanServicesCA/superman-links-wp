@@ -1889,18 +1889,33 @@ class Superman_Links_API {
     }
 
     /**
-     * Normalize apostrophe/quote variants so matching works regardless of
-     * whether WordPress texturized the content (straight vs curly quotes).
-     * Replaces common quote chars with a regex character class.
+     * Normalize typographic variants in a preg_quote'd token so matching
+     * works regardless of whether WordPress texturized the content.
+     * Covers: single quotes, double quotes, dashes, ellipsis.
      */
     private function normalize_quotes_for_regex($escaped_token) {
-        // After preg_quote, a straight apostrophe is still ' and curly ones
-        // are multi-byte sequences. Replace any of them with a class that
-        // matches all variants.
-        $quote_chars = "['\\x{2018}\\x{2019}\\x{2032}\\x{0060}]";
-        // Match straight apostrophe, left/right single quotes, prime, backtick
-        $pattern = "/['\\x{2018}\\x{2019}\\x{2032}\\x{0060}]/u";
-        return preg_replace($pattern, $quote_chars, $escaped_token);
+        // Single quotes / apostrophes: ' ' ' ′ `
+        $single_class = "['\\x{2018}\\x{2019}\\x{2032}\\x{0060}]";
+        $single_pattern = "/['\\x{2018}\\x{2019}\\x{2032}\\x{0060}]/u";
+        $result = preg_replace($single_pattern, $single_class, $escaped_token);
+
+        // Double quotes: " " " ″
+        $double_class = "[\"\\x{201C}\\x{201D}\\x{2033}]";
+        $double_pattern = "/[\"\\x{201C}\\x{201D}\\x{2033}]/u";
+        $result = preg_replace($double_pattern, $double_class, $result);
+
+        // Dashes: -- or — or – (em dash, en dash)
+        // preg_quote escapes hyphens, so match the escaped form too
+        $dash_class = "(?:\\-\\-|\\x{2014}|\\x{2013})";
+        $result = preg_replace("/\\x{2014}|\\x{2013}/u", $dash_class, $result);
+        $result = preg_replace("/\\\\-\\\\-/u", $dash_class, $result);
+
+        // Ellipsis: ... or …
+        $ellipsis_class = "(?:\\.{3}|\\x{2026})";
+        $result = preg_replace("/\\x{2026}/u", $ellipsis_class, $result);
+        $result = preg_replace("/\\\\\.\\\\\.\\\\\./u", $ellipsis_class, $result);
+
+        return $result;
     }
 
     /**
