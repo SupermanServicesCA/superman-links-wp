@@ -825,7 +825,7 @@ class Superman_Links_API {
 
         // Headings
         foreach ( $xpath->query( '//h1 | //h2 | //h3 | //h4 | //h5 | //h6' ) as $node ) {
-            $text = trim( preg_replace( '/\s+/', ' ', $node->textContent ) );
+            $text = trim( preg_replace( '/\s+/', ' ', $this->extract_text_with_spaces($node) ) );
             if ( $text !== '' ) {
                 $headings[] = $text;
             }
@@ -833,7 +833,7 @@ class Superman_Links_API {
 
         // Paragraphs and list items
         foreach ( $xpath->query( '//p | //li' ) as $node ) {
-            $text = trim( preg_replace( '/\s+/', ' ', $node->textContent ) );
+            $text = trim( preg_replace( '/\s+/', ' ', $this->extract_text_with_spaces($node) ) );
             if ( $text === '' || isset( $seen_para[ $text ] ) ) {
                 continue;
             }
@@ -904,9 +904,42 @@ class Superman_Links_API {
                 }
                 return apply_filters( 'the_content', $post->post_content );
 
+            case 'divi':
+                // Divi stores shortcodes that may not fully render in REST context.
+                // Try native rendering first, then strip shortcodes, then fetch live page.
+                $html = apply_filters( 'the_content', $post->post_content );
+                $clean_text = trim( wp_strip_all_tags( $html ) );
+                // If rendered HTML has real text (not just shortcode remnants), use it
+                if ( strlen( $clean_text ) > 100 && substr_count( $clean_text, '[' ) < 5 ) {
+                    return $html;
+                }
+                // Fallback: strip all shortcodes and re-render
+                $stripped = strip_shortcodes( $post->post_content );
+                $stripped_html = apply_filters( 'the_content', $stripped );
+                $stripped_text = trim( wp_strip_all_tags( $stripped_html ) );
+                if ( strlen( $stripped_text ) > 50 ) {
+                    return $stripped_html;
+                }
+                // Last resort: fetch the live rendered page (same as Bricks/Oxygen)
+                $response = wp_remote_get( get_permalink( $post->ID ), [
+                    'timeout'   => 15,
+                    'sslverify' => false,
+                    'headers'   => [ 'X-Superman-Internal' => '1' ],
+                ] );
+                if ( ! is_wp_error( $response ) ) {
+                    $body = wp_remote_retrieve_body( $response );
+                    if ( preg_match( '/<main\b[^>]*>(.*?)<\/main>/is', $body, $m ) ) {
+                        return $m[1];
+                    }
+                    if ( preg_match( '/<article\b[^>]*>(.*?)<\/article>/is', $body, $m ) ) {
+                        return $m[1];
+                    }
+                    return $body;
+                }
+                return $stripped_html;
+
             case 'gutenberg':
             case 'classic':
-            case 'divi':
             case 'wpbakery':
             case 'beaver_builder':
                 // WordPress core handles all shortcode/block-based builders
@@ -1877,6 +1910,27 @@ class Superman_Links_API {
         if ($path === '') $path = '/';
         $query = isset($parsed['query']) ? '?' . $parsed['query'] : '';
         return $host . $path . $query;
+    }
+
+    /**
+     * Extract text from a DOM node, inserting spaces between child element
+     * boundaries. Prevents DOMDocument::textContent from concatenating
+     * adjacent inline elements without whitespace (e.g. "rot.Carpenter").
+     */
+    private function extract_text_with_spaces($node) {
+        $text = '';
+        foreach ($node->childNodes as $child) {
+            if ($child->nodeType === XML_TEXT_NODE) {
+                $text .= $child->nodeValue;
+            } elseif ($child->nodeType === XML_ELEMENT_NODE) {
+                $childText = $this->extract_text_with_spaces($child);
+                if ($childText !== '' && $text !== '' && !preg_match('/\s$/', $text) && !preg_match('/^\s/', $childText)) {
+                    $text .= ' ';
+                }
+                $text .= $childText;
+            }
+        }
+        return $text;
     }
 
     /**
