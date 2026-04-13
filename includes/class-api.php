@@ -336,6 +336,23 @@ class Superman_Links_API {
                 ],
             ],
         ]);
+
+        register_rest_route('superman-links/v1', '/version', [
+            'methods' => 'GET',
+            'callback' => [$this, 'get_plugin_version'],
+            'permission_callback' => '__return_true',
+        ]);
+    }
+
+    /**
+     * Return the current plugin version.
+     */
+    public function get_plugin_version($request) {
+        return new WP_REST_Response([
+            'version' => SUPERMAN_LINKS_VERSION,
+            'php_version' => PHP_VERSION,
+            'wp_version' => get_bloginfo('version'),
+        ], 200);
     }
 
     /**

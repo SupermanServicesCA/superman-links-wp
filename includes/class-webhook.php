@@ -22,6 +22,9 @@ class Superman_Links_Webhook {
         // Hook into post delete/trash
         add_action('wp_trash_post', [$this, 'on_post_delete'], 10, 1);
         add_action('before_delete_post', [$this, 'on_post_delete'], 10, 1);
+
+        // Notify CRM when our plugin is updated
+        add_action('upgrader_process_complete', [$this, 'on_plugin_updated'], 10, 2);
     }
 
     /**
@@ -95,6 +98,7 @@ class Superman_Links_Webhook {
             'action' => $action,
             'site_url' => get_site_url(),
             'api_key' => $api_key,
+            'plugin_version' => defined('SUPERMAN_LINKS_VERSION') ? SUPERMAN_LINKS_VERSION : null,
             'post' => [
                 'id' => $post_id,
                 'url' => get_permalink($post_id),
@@ -129,6 +133,51 @@ class Superman_Links_Webhook {
             $response_body = wp_remote_retrieve_body($response);
             error_log('Superman Links Webhook Response: ' . $response_code . ' - ' . $response_body);
         }
+    }
+
+    /**
+     * When our plugin is updated, notify the CRM of the new version.
+     */
+    public function on_plugin_updated($upgrader, $options) {
+        if ($options['action'] !== 'update' || $options['type'] !== 'plugin') {
+            return;
+        }
+
+        // Check if our plugin was in the updated list
+        $our_plugin = 'superman-links/superman-links.php';
+        $plugins = isset($options['plugins']) ? $options['plugins'] : [];
+        if (!is_array($plugins) || !in_array($our_plugin, $plugins)) {
+            return;
+        }
+
+        $api_key = get_option('superman_links_api_key', '');
+        if (empty($api_key) || empty($this->webhook_url) || empty($this->supabase_anon_key)) {
+            return;
+        }
+
+        // Re-read the version constant (it may have been updated by the upgrader)
+        // Since PHP already loaded the old constant, read it from the file directly
+        $plugin_file = WP_PLUGIN_DIR . '/' . $our_plugin;
+        $plugin_data = get_plugin_data($plugin_file, false, false);
+        $new_version = isset($plugin_data['Version']) ? $plugin_data['Version'] : SUPERMAN_LINKS_VERSION;
+
+        $payload = [
+            'action' => 'plugin_version',
+            'site_url' => get_site_url(),
+            'api_key' => $api_key,
+            'plugin_version' => $new_version,
+        ];
+
+        wp_remote_post($this->webhook_url, [
+            'body' => wp_json_encode($payload),
+            'headers' => [
+                'Content-Type' => 'application/json',
+                'Authorization' => 'Bearer ' . $this->supabase_anon_key,
+            ],
+            'timeout' => 10,
+            'blocking' => false,
+            'sslverify' => true,
+        ]);
     }
 
     /**
