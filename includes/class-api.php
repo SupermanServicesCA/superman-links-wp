@@ -1889,6 +1889,21 @@ class Superman_Links_API {
     }
 
     /**
+     * Normalize apostrophe/quote variants so matching works regardless of
+     * whether WordPress texturized the content (straight vs curly quotes).
+     * Replaces common quote chars with a regex character class.
+     */
+    private function normalize_quotes_for_regex($escaped_token) {
+        // After preg_quote, a straight apostrophe is still ' and curly ones
+        // are multi-byte sequences. Replace any of them with a class that
+        // matches all variants.
+        $quote_chars = "['\\x{2018}\\x{2019}\\x{2032}\\x{0060}]";
+        // Match straight apostrophe, left/right single quotes, prime, backtick
+        $pattern = "/['\\x{2018}\\x{2019}\\x{2032}\\x{0060}]/u";
+        return preg_replace($pattern, $quote_chars, $escaped_token);
+    }
+
+    /**
      * Wrap the first occurrence of $anchor_text in $html with an <a> tag,
      * scoped to the region of $html whose plain-text contains $context.
      *
@@ -1955,7 +1970,10 @@ class Superman_Links_API {
             $needle_norm = $this->normalize_whitespace($needle);
             if ($needle_norm === '') return null;
             $tokens = preg_split('/\s+/u', $needle_norm);
-            $escaped = array_map(function ($t) { return preg_quote($t, '/'); }, $tokens);
+            $escaped = array_map(function ($t) {
+                $quoted = preg_quote($t, '/');
+                return $this->normalize_quotes_for_regex($quoted);
+            }, $tokens);
             return '/' . implode('\s+', $escaped) . '/iu';
         };
 
