@@ -1406,11 +1406,14 @@ class Superman_Links_API {
         $page_settings = $template_data['elementor']['page_settings'] ?? null;
         $template_type = $template_data['page']['template_type'] ?? 'page';
 
-        // Encode data as JSON if it's an array
+        // Encode data as JSON if it's an array. `update_post_meta` runs
+        // `wp_unslash` internally and will strip `\uXXXX` / `\/` escapes,
+        // which leaves `_elementor_data` as invalid JSON and Elementor
+        // silently drops every element on load. `wp_slash()` preserves them.
         $elementor_json = is_array($elementor_data) ? wp_json_encode($elementor_data) : $elementor_data;
 
         // Update Elementor meta
-        update_post_meta($post_id, '_elementor_data', $elementor_json);
+        update_post_meta($post_id, '_elementor_data', wp_slash($elementor_json));
         update_post_meta($post_id, '_elementor_edit_mode', 'builder');
         update_post_meta($post_id, '_elementor_template_type', $template_type);
         update_post_meta($post_id, '_elementor_version', ELEMENTOR_VERSION);
@@ -1418,7 +1421,7 @@ class Superman_Links_API {
         // Update page settings if provided
         if (!empty($page_settings)) {
             $settings_json = is_array($page_settings) ? wp_json_encode($page_settings) : $page_settings;
-            update_post_meta($post_id, '_elementor_page_settings', $settings_json);
+            update_post_meta($post_id, '_elementor_page_settings', wp_slash($settings_json));
         }
 
         // Apply SEO data if provided
