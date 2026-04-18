@@ -28,6 +28,31 @@ class Superman_Links_Updater {
         add_filter('pre_set_site_transient_update_plugins', [$this, 'check_for_update']);
         add_filter('plugins_api', [$this, 'plugin_info'], 10, 3);
         add_filter('upgrader_post_install', [$this, 'after_install'], 10, 3);
+
+        // Admin-only force-check: ?superman_force_check=1 clears the 12h cache.
+        // Useful when a GitHub release just shipped and you don't want to wait.
+        add_action('admin_init', [$this, 'maybe_force_check']);
+    }
+
+    /**
+     * Admin hook: when a staff user hits any admin page with
+     * ?superman_force_check=1, drop the update transient so the next
+     * `pre_set_site_transient_update_plugins` pass re-queries GitHub.
+     */
+    public function maybe_force_check() {
+        if (!current_user_can('update_plugins')) {
+            return;
+        }
+        if (empty($_GET['superman_force_check'])) {
+            return;
+        }
+        delete_transient($this->cache_key);
+        delete_site_transient('update_plugins');
+        if (function_exists('wp_admin_notice')) {
+            add_action('admin_notices', function () {
+                echo '<div class="notice notice-success is-dismissible"><p>Superman Links: update cache flushed. Visit Plugins page to see the new version.</p></div>';
+            });
+        }
     }
 
     /**
