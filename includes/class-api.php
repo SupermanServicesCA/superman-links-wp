@@ -342,6 +342,129 @@ class Superman_Links_API {
             'callback' => [$this, 'get_plugin_version'],
             'permission_callback' => '__return_true',
         ]);
+
+        // Elementor capabilities (Pro status, available widgets, Site Kit snapshot)
+        register_rest_route($this->namespace, '/elementor/capabilities', [
+            'methods' => 'GET',
+            'callback' => [$this, 'get_elementor_capabilities'],
+            'permission_callback' => [$this, 'check_api_key'],
+        ]);
+    }
+
+    /**
+     * Return Elementor capabilities for the Page Builder pipeline.
+     * - pro_active / pro_version / free_version
+     * - available_widgets (registered widget type names)
+     * - site_kit { fonts, colors } extracted from the active Elementor kit
+     */
+    public function get_elementor_capabilities($request) {
+        if (!defined('ELEMENTOR_VERSION')) {
+            return new WP_Error(
+                'elementor_not_active',
+                __('Elementor is not active on this site.', 'superman-links'),
+                ['status' => 400]
+            );
+        }
+
+        $pro_active  = defined('ELEMENTOR_PRO_VERSION');
+        $pro_version = $pro_active ? ELEMENTOR_PRO_VERSION : null;
+        $free_version = ELEMENTOR_VERSION;
+
+        $available_widgets = [];
+        if (class_exists('\\Elementor\\Plugin')) {
+            $plugin = \Elementor\Plugin::$instance;
+            if ($plugin && isset($plugin->widgets_manager)) {
+                $widget_types = $plugin->widgets_manager->get_widget_types();
+                if (is_array($widget_types)) {
+                    $available_widgets = array_values(array_map('strval', array_keys($widget_types)));
+                }
+            }
+        }
+
+        $site_kit = [
+            'fonts'  => [],
+            'colors' => (object) [],
+        ];
+
+        $kit_id = (int) get_option('elementor_active_kit');
+        if ($kit_id > 0) {
+            $page_settings = get_post_meta($kit_id, '_elementor_page_settings', true);
+            if (is_string($page_settings)) {
+                $page_settings = json_decode($page_settings, true);
+            }
+            if (is_array($page_settings)) {
+                $color_map = [];
+                $color_buckets = [];
+
+                $collect_colors = function ($list) use (&$color_buckets) {
+                    if (!is_array($list)) return;
+                    foreach ($list as $entry) {
+                        if (!is_array($entry)) continue;
+                        $title = isset($entry['title']) ? strtolower((string) $entry['title']) : '';
+                        $hex   = isset($entry['color']) ? (string) $entry['color'] : '';
+                        if ($title === '' || $hex === '') continue;
+                        $color_buckets[] = ['title' => $title, 'color' => $hex];
+                    }
+                };
+                $collect_colors($page_settings['system_colors'] ?? []);
+                $collect_colors($page_settings['custom_colors'] ?? []);
+
+                $known = [
+                    'primary'   => ['primary', 'brand'],
+                    'secondary' => ['secondary'],
+                    'accent'    => ['accent', 'cta'],
+                    'text'      => ['text', 'body', 'foreground'],
+                ];
+                foreach ($color_buckets as $entry) {
+                    foreach ($known as $key => $needles) {
+                        if (isset($color_map[$key])) continue;
+                        foreach ($needles as $needle) {
+                            if (strpos($entry['title'], $needle) !== false) {
+                                $color_map[$key] = $entry['color'];
+                                break;
+                            }
+                        }
+                    }
+                }
+                // Surface a couple of extras for the UI diff view
+                $extras = [];
+                foreach ($color_buckets as $entry) {
+                    $hex = $entry['color'];
+                    if (!in_array($hex, $color_map, true) && count($extras) < 4) {
+                        $extras[] = $hex;
+                    }
+                }
+                if (!empty($extras)) {
+                    foreach ($extras as $i => $hex) {
+                        $color_map['extra_' . ($i + 1)] = $hex;
+                    }
+                }
+                if (!empty($color_map)) {
+                    $site_kit['colors'] = $color_map;
+                }
+
+                $fonts = [];
+                $typo = $page_settings['system_typography'] ?? [];
+                if (is_array($typo)) {
+                    foreach ($typo as $entry) {
+                        if (!is_array($entry)) continue;
+                        $family = $entry['typography_font_family'] ?? null;
+                        if (is_string($family) && $family !== '' && !in_array($family, $fonts, true)) {
+                            $fonts[] = $family;
+                        }
+                    }
+                }
+                $site_kit['fonts'] = array_values($fonts);
+            }
+        }
+
+        return rest_ensure_response([
+            'pro_active'        => $pro_active,
+            'pro_version'       => $pro_version,
+            'free_version'      => $free_version,
+            'available_widgets' => $available_widgets,
+            'site_kit'          => $site_kit,
+        ]);
     }
 
     /**
