@@ -936,10 +936,12 @@ class Superman_Links_API {
     private function parse_html_to_structured( $html, $base_url = '' ) {
         if ( empty( $html ) ) {
             return [
-                'headings'   => [],
-                'paragraphs' => [],
-                'links'      => [],
-                'full_text'  => '',
+                'headings'    => [],
+                'paragraphs'  => [],
+                'links'       => [],
+                'full_text'   => '',
+                'image_count' => 0,
+                'image_alts'  => [],
             ];
         }
 
@@ -981,6 +983,17 @@ class Superman_Links_API {
             $paragraphs[]       = $text;
         }
 
+        // Images — count and extract alt texts
+        $image_count = 0;
+        $image_alts  = [];
+        foreach ( $xpath->query( '//img[@src]' ) as $node ) {
+            $image_count++;
+            $alt = trim( $node->getAttribute( 'alt' ) );
+            if ( $alt !== '' ) {
+                $image_alts[] = $alt;
+            }
+        }
+
         // Links — capture url + anchor text + parent paragraph context
         foreach ( $xpath->query( '//a[@href]' ) as $node ) {
             $href = trim( $node->getAttribute( 'href' ) );
@@ -1020,10 +1033,12 @@ class Superman_Links_API {
         $full_text = trim( implode( "\n", array_merge( $headings, $paragraphs ) ) );
 
         return [
-            'headings'   => $headings,
-            'paragraphs' => $paragraphs,
-            'links'      => $links,
-            'full_text'  => $full_text,
+            'headings'    => $headings,
+            'paragraphs'  => $paragraphs,
+            'links'       => $links,
+            'full_text'   => $full_text,
+            'image_count' => $image_count,
+            'image_alts'  => $image_alts,
         ];
     }
 
@@ -1516,21 +1531,75 @@ class Superman_Links_API {
             $parsed['full_text'] = $title . "\n" . $parsed['full_text'];
         }
 
+        // Extract SEO signals from WordPress/Rank Math
+        $meta_description = '';
+        $meta_robots      = '';
+        $canonical_url    = '';
+        $schema_types     = [];
+
+        // Try Rank Math first, then Yoast
+        $rm_desc = get_post_meta($post_id, 'rank_math_description', true);
+        if ($rm_desc) {
+            $meta_description = $rm_desc;
+        } else {
+            $yoast_desc = get_post_meta($post_id, '_yoast_wpseo_metadesc', true);
+            if ($yoast_desc) {
+                $meta_description = $yoast_desc;
+            }
+        }
+
+        $rm_robots = get_post_meta($post_id, 'rank_math_robots', true);
+        if (is_array($rm_robots)) {
+            $meta_robots = implode(', ', $rm_robots);
+        }
+
+        if (function_exists('wp_get_canonical_url')) {
+            $canonical_url = wp_get_canonical_url($post_id) ?: '';
+        }
+
+        // Extract schema @type values from ld+json in the rendered HTML
+        if (preg_match_all('/<script[^>]*type=["\']application\/ld\+json["\'][^>]*>(.*?)<\/script>/si', $html, $schema_matches)) {
+            foreach ($schema_matches[1] as $json_str) {
+                $schema_data = json_decode(trim($json_str), true);
+                if (is_array($schema_data) && isset($schema_data['@type'])) {
+                    $types = (array) $schema_data['@type'];
+                    $schema_types = array_merge($schema_types, $types);
+                }
+                if (is_array($schema_data) && isset($schema_data['@graph'])) {
+                    foreach ($schema_data['@graph'] as $node) {
+                        if (isset($node['@type'])) {
+                            $types = (array) $node['@type'];
+                            $schema_types = array_merge($schema_types, $types);
+                        }
+                    }
+                }
+            }
+            $schema_types = array_unique($schema_types);
+        }
+
         $payload = [
             'action'   => 'linkfinder_page_push',
             'site_url' => $site_url,
             'api_key'  => $api_key,
             'post'     => [
-                'id'           => $post_id,
-                'url'          => get_permalink($post_id),
-                'title'        => $title,
-                'modified_at'  => mysql_to_rfc3339($post->post_modified_gmt),
-                'builder'      => $builder,
-                'headings'     => $parsed['headings'],
-                'paragraphs'   => $parsed['paragraphs'],
-                'links'        => $parsed['links'],
-                'full_text'    => $parsed['full_text'],
-                'content_hash' => md5($post->post_modified_gmt . '|' . substr($html, 0, 50000)),
+                'id'                => $post_id,
+                'url'               => get_permalink($post_id),
+                'title'             => $title,
+                'modified_at'       => mysql_to_rfc3339($post->post_modified_gmt),
+                'published_at'      => mysql_to_rfc3339($post->post_date_gmt),
+                'builder'           => $builder,
+                'headings'          => $parsed['headings'],
+                'paragraphs'        => $parsed['paragraphs'],
+                'links'             => $parsed['links'],
+                'full_text'         => $parsed['full_text'],
+                'content_hash'      => md5($post->post_modified_gmt . '|' . substr($html, 0, 50000)),
+                'image_count'       => $parsed['image_count'],
+                'image_alts'        => $parsed['image_alts'],
+                'has_featured_image' => has_post_thumbnail($post_id),
+                'meta_description'  => $meta_description,
+                'meta_robots'       => $meta_robots,
+                'canonical_url'     => $canonical_url,
+                'schema_types'      => array_values($schema_types),
             ],
         ];
         if ($session_id) {
