@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.0
 Tested up to: 6.7
-Stable tag: 1.8.2
+Stable tag: 1.9.0
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,13 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 1.9.0 =
+* Added Review Widget feature - Google Reviews carousel via shortcode
+* New REST endpoint: POST /reviews for pushing review data from CRM
+* Shortcode [superman_reviews] with configurable max reviews
+* Responsive carousel with CSS scroll-snap, touch swipe, and arrow navigation
+* Server-side rendering with graceful fallback when no data
 
 = 1.2.0 =
 * Added Elementor template support
