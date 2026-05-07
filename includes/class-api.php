@@ -270,11 +270,9 @@ class Superman_Links_API {
                 ],
                 'anchor_text' => [
                     'required' => true,
-                    'sanitize_callback' => 'sanitize_text_field',
                 ],
                 'match_context' => [
                     'required' => false,
-                    'sanitize_callback' => 'sanitize_textarea_field',
                 ],
             ],
         ]);
@@ -1898,7 +1896,11 @@ class Superman_Links_API {
         $source_post_id = $request->get_param('source_post_id');
         $target_url = $request->get_param('target_url');
         $anchor_text = $request->get_param('anchor_text');
+        $anchor_text = wp_strip_all_tags(wp_kses_no_null(wp_check_invalid_utf8($anchor_text)));
         $match_context = $request->get_param('match_context');
+        if ($match_context) {
+            $match_context = wp_strip_all_tags(wp_kses_no_null(wp_check_invalid_utf8($match_context)));
+        }
 
         $post = get_post($source_post_id);
         if (!$post || $post->post_status !== 'publish') {
@@ -2641,11 +2643,10 @@ class Superman_Links_API {
                 $this->regenerate_elementor_css($post_id);
                 return ['mode' => 'wrap'];
             }
-            return new WP_Error(
-                'context_not_found',
-                __('Could not find that sentence in the Elementor content. The LinkFinder index may be stale — re-sync this site from the WordPress admin.', 'superman-links'),
-                ['status' => 422]
-            );
+            // Elementor text-editor widgets didn't contain the context —
+            // fall back to post_content (handles theme-post-content widgets,
+            // shortcode widgets, and other non-text-editor sources).
+            return $this->insert_link_standard($post_id, $target_url, $anchor_text, $match_context);
         }
 
         // No context: legacy append-to-last-text-editor behavior
