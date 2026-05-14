@@ -79,8 +79,7 @@
           card.classList.remove('srw-card-hidden');
           // Reset animation by toggling the class via reflow
           card.style.animation = 'none';
-          // eslint-disable-next-line no-unused-expressions
-          card.offsetHeight;
+          void card.offsetHeight;
           card.style.animation = '';
         } else {
           card.classList.add('srw-card-hidden');
