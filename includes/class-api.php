@@ -347,6 +347,20 @@ class Superman_Links_API {
             'callback' => [$this, 'get_elementor_capabilities'],
             'permission_callback' => [$this, 'check_api_key'],
         ]);
+
+        // Patch one widget on an existing Elementor page (shallow-merge settings)
+        register_rest_route($this->namespace, '/elementor/widget/(?P<post_id>\d+)/(?P<element_id>[a-f0-9]+)', [
+            'methods' => 'PATCH',
+            'callback' => [$this, 'patch_elementor_widget'],
+            'permission_callback' => [$this, 'check_api_key'],
+        ]);
+
+        // Batch-patch many widgets in one save (1× CSS regen instead of N)
+        register_rest_route($this->namespace, '/elementor/widget/(?P<post_id>\d+)/batch', [
+            'methods' => 'POST',
+            'callback' => [$this, 'batch_patch_elementor_widgets'],
+            'permission_callback' => [$this, 'check_api_key'],
+        ]);
     }
 
     /**
@@ -2932,5 +2946,405 @@ class Superman_Links_API {
             'keyword_count' => count($existing),
             'keywords' => $existing,
         ]);
+    }
+
+    // ==========================================
+    // Elementor Widget Patch (v1.12.0)
+    // ==========================================
+
+    public function patch_elementor_widget($request) {
+        if (!$this->is_elementor_active()) {
+            return new WP_Error('elementor_not_active', __('Elementor is not active on this site.', 'superman-links'), ['status' => 400]);
+        }
+
+        $post_id    = (int) $request['post_id'];
+        $element_id = (string) $request['element_id'];
+        $body       = $request->get_json_params();
+        $patch      = isset($body['settings_patch']) && is_array($body['settings_patch']) ? $body['settings_patch'] : null;
+        $expected   = isset($body['expected_widget_type']) ? (string) $body['expected_widget_type'] : null;
+
+        if (!$patch) {
+            return new WP_Error('invalid_patch', __('settings_patch is required and must be a non-empty object.', 'superman-links'), ['status' => 400]);
+        }
+
+        $result = $this->apply_widget_patches($post_id, [[
+            'element_id'           => $element_id,
+            'settings_patch'       => $patch,
+            'expected_widget_type' => $expected,
+        ]]);
+
+        if (is_wp_error($result)) {
+            return $result;
+        }
+
+        $first = $result['ops'][0];
+        return rest_ensure_response([
+            'success'        => true,
+            'post_id'        => $post_id,
+            'element_id'     => $first['element_id'],
+            'widget_type'    => $first['widget_type'],
+            'settings'       => $first['settings'],
+            'unknown_keys'   => $first['unknown_keys'],
+            'dropped_keys'   => $first['dropped_keys'],
+            'round_trip_ok'  => empty($first['dropped_keys']),
+        ]);
+    }
+
+    public function batch_patch_elementor_widgets($request) {
+        if (!$this->is_elementor_active()) {
+            return new WP_Error('elementor_not_active', __('Elementor is not active on this site.', 'superman-links'), ['status' => 400]);
+        }
+
+        $post_id = (int) $request['post_id'];
+        $body    = $request->get_json_params();
+        $ops_raw = isset($body['ops']) && is_array($body['ops']) ? $body['ops'] : null;
+
+        if (!$ops_raw) {
+            return new WP_Error('invalid_batch', __('ops array is required.', 'superman-links'), ['status' => 400]);
+        }
+
+        $normalized = [];
+        foreach ($ops_raw as $i => $op) {
+            if (!is_array($op) || empty($op['elementId']) || empty($op['settingsPatch']) || !is_array($op['settingsPatch'])) {
+                return new WP_Error('invalid_batch_op', sprintf('Op %d missing elementId or settingsPatch.', $i), ['status' => 400]);
+            }
+            $normalized[] = [
+                'element_id'           => (string) $op['elementId'],
+                'settings_patch'       => $op['settingsPatch'],
+                'expected_widget_type' => isset($op['expectedWidgetType']) ? (string) $op['expectedWidgetType'] : null,
+            ];
+        }
+
+        $result = $this->apply_widget_patches($post_id, $normalized);
+        if (is_wp_error($result)) {
+            return $result;
+        }
+
+        $any_dropped = false;
+        foreach ($result['ops'] as $op) {
+            if (!empty($op['dropped_keys'])) {
+                $any_dropped = true;
+                break;
+            }
+        }
+
+        return rest_ensure_response([
+            'success'       => true,
+            'post_id'       => $post_id,
+            'ops'           => $result['ops'],
+            'round_trip_ok' => !$any_dropped,
+        ]);
+    }
+
+    /**
+     * Apply N patches atomically: validate all, merge all into one in-memory
+     * tree, save once, round-trip verify. Returns WP_Error on any failure
+     * (post untouched) or array with per-op results.
+     */
+    private function apply_widget_patches($post_id, array $ops) {
+        if (get_post_status($post_id) === false) {
+            return new WP_Error('post_not_found', sprintf('Post %d not found.', $post_id), ['status' => 404]);
+        }
+
+        // Validate each patch's keys before touching the tree.
+        $validations = [];
+        foreach ($ops as $i => $op) {
+            $check = $this->validate_patch_keys($op['settings_patch']);
+            if (!empty($check['banned'])) {
+                return new WP_Error('invalid_patch', sprintf('Op %d patch contains banned keys: %s', $i, implode(', ', $check['banned'])), ['status' => 400]);
+            }
+            $validations[$i] = $check;
+        }
+
+        $tree = $this->read_elementor_tree($post_id);
+        if ($tree === null) {
+            return new WP_Error('elementor_data_missing', sprintf('Post %d has no Elementor data.', $post_id), ['status' => 404]);
+        }
+
+        // Pre-walk: locate every target, assert widget + type, then mutate.
+        $merged_per_op = [];
+        foreach ($ops as $i => $op) {
+            $element = &$this->walk_elementor_tree($tree, $op['element_id']);
+            if ($element === null) {
+                unset($element);
+                return new WP_Error('element_not_found', sprintf('Op %d: element %s not found in post %d.', $i, $op['element_id'], $post_id), ['status' => 404]);
+            }
+            if (!isset($element['elType']) || $element['elType'] !== 'widget') {
+                unset($element);
+                return new WP_Error('not_a_widget', sprintf('Op %d: element %s is %s, not a widget. Container patches are not supported in v1.', $i, $op['element_id'], $element['elType'] ?? 'unknown'), ['status' => 422]);
+            }
+            if ($op['expected_widget_type'] !== null && ($element['widgetType'] ?? '') !== $op['expected_widget_type']) {
+                $actual = $element['widgetType'] ?? 'unknown';
+                unset($element);
+                return new WP_Error('widget_type_mismatch', sprintf('Op %d: expected widget_type=%s, got %s.', $i, $op['expected_widget_type'], $actual), ['status' => 409]);
+            }
+
+            $sanitized_patch = $this->sanitize_patch_strings($op['settings_patch']);
+            $current_settings = isset($element['settings']) && is_array($element['settings']) ? $element['settings'] : [];
+            $element['settings'] = array_merge($current_settings, $sanitized_patch);
+
+            $merged_per_op[$i] = [
+                'element_id'   => $op['element_id'],
+                'widget_type'  => $element['widgetType'] ?? null,
+                'settings'     => $element['settings'],
+                'patch_sent'   => $sanitized_patch,
+                'unknown_keys' => $validations[$i]['unknown'],
+            ];
+            unset($element);
+        }
+
+        // One save for the whole batch.
+        $saved = $this->write_elementor_tree($post_id, $tree);
+        if (!$saved) {
+            return new WP_Error('save_failed', 'Failed to write _elementor_data.', ['status' => 500]);
+        }
+
+        // Round-trip verify: re-read and compare every requested key against
+        // the stored settings. Surfaces silent-drop bugs (wp_slash regressions,
+        // type rejections, etc.).
+        $reread = $this->read_elementor_tree($post_id);
+        if ($reread === null) {
+            return new WP_Error('round_trip_failed', 'Wrote post meta but could not re-read.', ['status' => 500]);
+        }
+
+        $out_ops = [];
+        foreach ($merged_per_op as $i => $merged) {
+            $stored = $this->walk_elementor_tree($reread, $merged['element_id']);
+            $stored_settings = ($stored && isset($stored['settings']) && is_array($stored['settings'])) ? $stored['settings'] : [];
+            $dropped = [];
+            foreach ($merged['patch_sent'] as $k => $v) {
+                if (!array_key_exists($k, $stored_settings) || $stored_settings[$k] !== $v) {
+                    $dropped[] = $k;
+                }
+            }
+            $out_ops[] = [
+                'element_id'   => $merged['element_id'],
+                'widget_type'  => $merged['widget_type'],
+                'settings'     => $stored_settings,
+                'unknown_keys' => $merged['unknown_keys'],
+                'dropped_keys' => $dropped,
+            ];
+        }
+
+        return ['ops' => $out_ops];
+    }
+
+    /**
+     * Read Elementor tree via document API with raw post_meta fallback.
+     */
+    private function read_elementor_tree($post_id) {
+        if (class_exists('\\Elementor\\Plugin')) {
+            try {
+                $document = \Elementor\Plugin::$instance->documents->get($post_id);
+                if ($document) {
+                    $data = $document->get_elements_data();
+                    if (is_array($data) && !empty($data)) {
+                        return $data;
+                    }
+                }
+            } catch (Exception $e) {
+                // fall through to post_meta path
+            }
+        }
+        $raw = get_post_meta($post_id, '_elementor_data', true);
+        if (empty($raw)) {
+            return null;
+        }
+        $decoded = json_decode($raw, true);
+        return is_array($decoded) ? $decoded : null;
+    }
+
+    /**
+     * Write Elementor tree via document save with raw post_meta fallback +
+     * CSS cache bust. The wp_slash() wrap on the fallback is load-bearing —
+     * see v1.8.1.
+     */
+    private function write_elementor_tree($post_id, array $tree) {
+        $saved_via_document = false;
+        if (class_exists('\\Elementor\\Plugin')) {
+            try {
+                $document = \Elementor\Plugin::$instance->documents->get($post_id);
+                if ($document && method_exists($document, 'save')) {
+                    $saved_via_document = (bool) $document->save(['elements' => $tree]);
+                }
+            } catch (Exception $e) {
+                $saved_via_document = false;
+            }
+        }
+
+        if (!$saved_via_document) {
+            $json = wp_json_encode($tree);
+            if ($json === false) {
+                return false;
+            }
+            update_post_meta($post_id, '_elementor_data', wp_slash($json));
+            update_post_meta($post_id, '_elementor_edit_mode', 'builder');
+            if (defined('ELEMENTOR_VERSION')) {
+                update_post_meta($post_id, '_elementor_version', ELEMENTOR_VERSION);
+            }
+            delete_post_meta($post_id, '_elementor_css');
+            $cached = WP_CONTENT_DIR . '/uploads/elementor/css/post-' . (int) $post_id . '.css';
+            if (file_exists($cached)) {
+                @unlink($cached);
+            }
+        }
+
+        // Belt-and-suspenders on both paths.
+        $this->regenerate_elementor_css($post_id);
+        return true;
+    }
+
+    /**
+     * Recursive DFS for an element by id. Returns by reference so callers can
+     * mutate in place. Returns null reference if not found (caller must
+     * isset()-check after the call by assigning to a temp).
+     */
+    private function &walk_elementor_tree(array &$tree, $element_id) {
+        $null = null;
+        foreach ($tree as $i => &$node) {
+            if (isset($node['id']) && $node['id'] === $element_id) {
+                return $tree[$i];
+            }
+            if (!empty($node['elements']) && is_array($node['elements'])) {
+                $found = &$this->walk_elementor_tree($node['elements'], $element_id);
+                if ($found !== null) {
+                    return $found;
+                }
+                unset($found);
+            }
+        }
+        return $null;
+    }
+
+    /**
+     * Validate patch keys: hard-reject banned, soft-warn unknown.
+     * Returns ['banned' => [...], 'unknown' => [...]].
+     */
+    private function validate_patch_keys(array $patch) {
+        $banned = [];
+        $unknown = [];
+        $allowlist = $this->elementor_advanced_key_allowlist();
+        $responsive_suffixes = ['_mobile', '_tablet', '_widescreen', '_laptop', '_mobile_extra', '_tablet_extra'];
+
+        foreach ($patch as $key => $_v) {
+            if ($key === '__globals__' || $key === '__dynamic__' || strpos($key, 'neb_content_protection_') === 0) {
+                $banned[] = $key;
+                continue;
+            }
+            // Strip responsive suffix to check base key.
+            $base = $key;
+            foreach ($responsive_suffixes as $suf) {
+                $len = strlen($suf);
+                if (substr($key, -$len) === $suf) {
+                    $base = substr($key, 0, -$len);
+                    break;
+                }
+            }
+            if (in_array($base, $allowlist, true)) {
+                continue;
+            }
+            // Group-control prefix match: many widget settings share prefixes
+            // like `title_typography_*`, `border_*`. Accept any key with a
+            // known prefix even if exact key isn't in the allowlist.
+            $matched_prefix = false;
+            foreach ($allowlist as $allowed) {
+                if (strpos($base, $allowed . '_') === 0) {
+                    $matched_prefix = true;
+                    break;
+                }
+            }
+            if (!$matched_prefix) {
+                $unknown[] = $key;
+            }
+        }
+
+        return ['banned' => $banned, 'unknown' => $unknown];
+    }
+
+    /**
+     * Curated allowlist of common-base Elementor control keys + per-widget
+     * top-level settings we see in the wild. Sourced from msrbuilds review
+     * (common_advanced_keys) + our fleet-sample.json. Data, not code — copy
+     * patterns, not GPL'd source.
+     */
+    private function elementor_advanced_key_allowlist() {
+        return [
+            // Common advanced
+            '_margin', '_padding', '_element_id', '_css_classes', '_element_width',
+            '_element_custom_width', '_element_vertical_align', '_position',
+            '_z_index', 'css_classes', 'custom_css',
+            // Background + overlay
+            'background_background', 'background_color', 'background_image',
+            'background_position', 'background_size', 'background_repeat',
+            'background_attachment', 'background_xpos', 'background_ypos',
+            'background_overlay_background', 'background_overlay_color',
+            'background_overlay_image', 'background_overlay_opacity',
+            // Border + shadow
+            'border_border', 'border_width', 'border_color', 'border_radius',
+            'box_shadow_box_shadow_type', 'box_shadow_box_shadow',
+            // Motion FX + transforms + hide
+            'motion_fx_motion_fx_scrolling', 'motion_fx_motion_fx_mouse',
+            'transform', '_transform', 'hide_desktop', 'hide_tablet', 'hide_mobile',
+            'animation', 'animation_duration', 'animation_delay',
+            // Typography (group control prefix)
+            'typography', 'typography_typography', 'typography_font_family',
+            'typography_font_size', 'typography_font_weight', 'typography_line_height',
+            'typography_letter_spacing', 'typography_text_transform', 'typography_font_style',
+            'typography_text_decoration', 'typography_word_spacing',
+            // Container layout
+            'content_width', 'boxed_width', 'min_height', 'html_tag',
+            'flex_direction', 'flex_justify_content', 'flex_align_items',
+            'flex_gap', 'flex_wrap',
+            // Per-widget common
+            'title', 'title_color', 'header_size', 'align', 'text_align',
+            'editor', 'text', 'link', 'url', 'is_external', 'nofollow',
+            'image', 'caption', 'alt', 'image_size',
+            'button_text', 'size', 'button_type', 'selected_icon',
+            'items', 'tabs', 'icon_list',
+            'title_text', 'description_text', 'view',
+            // Nested-accordion specific
+            'accordion_item_title_position_horizontal', 'accordion_item_title_icon_position',
+            'title_tag', 'faq_schema', 'rank_math_add_faq_schema',
+            'normal_title_color', 'active_title_color', 'icon_size',
+            'accordion_border_normal_border', 'accordion_border_normal_width',
+            'accordion_padding', 'content_border_border', 'content_border_width',
+            'content_padding',
+            'title_typography', 'title_typography_typography', 'title_typography_font_family',
+            'title_typography_font_size', 'title_typography_font_weight',
+            'description_typography', 'text_typography',
+            // CSS filters
+            'css_filters_css_filter', 'css_filter_blur', 'css_filter_brightness',
+            'css_filter_contrast', 'css_filter_saturate', 'css_filter_hue',
+            // Button-specific
+            'text_padding', 'button_text_color', 'button_background_color',
+            // Section heading
+            '_title',
+            // Shortcode + html
+            'shortcode', 'html',
+        ];
+    }
+
+    /**
+     * Recursively run wp_kses_post on string values. URLs and known
+     * non-content strings pass through (they're validated client-side).
+     */
+    private function sanitize_patch_strings(array $patch) {
+        $out = [];
+        foreach ($patch as $k => $v) {
+            if (is_string($v)) {
+                // Skip color/size/url-shaped strings: kses would mangle them
+                // but they're already safe (no markup).
+                if (preg_match('/^(#[0-9a-fA-F]{3,8}|https?:\/\/|\/\/|\/|tel:|mailto:|\d+(?:\.\d+)?(?:px|em|rem|vh|vw|%|s)?)$/', $v)) {
+                    $out[$k] = $v;
+                } else {
+                    $out[$k] = wp_kses_post($v);
+                }
+            } elseif (is_array($v)) {
+                $out[$k] = $this->sanitize_patch_strings($v);
+            } else {
+                $out[$k] = $v;
+            }
+        }
+        return $out;
     }
 }
