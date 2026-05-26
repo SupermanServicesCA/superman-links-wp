@@ -2,8 +2,8 @@
 
 .superman-reviews-widget {
     /* CSS vars are set inline per-widget; safe defaults here for SSR fallback */
-    --srw-header-bg: #1a2b7c;
-    --srw-accent: #e87010;
+    --srw-header-bg: #1f2937;
+    --srw-accent: #fbbc04;
     --srw-text-on-header: #ffffff;
     --srw-body-bg: #eef0f8;
     --srw-card-bg: #ffffff;

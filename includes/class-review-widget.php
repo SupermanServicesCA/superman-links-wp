@@ -99,9 +99,9 @@ class Superman_Links_Review_Widget {
 
         // v2 config keys with legacy fallback
         $header_bg = !empty($config['header_bg_color']) ? $config['header_bg_color']
-                    : (!empty($config['card_bg_color']) ? $config['card_bg_color'] : '#1a2b7c');
+                    : (!empty($config['card_bg_color']) ? $config['card_bg_color'] : '#1f2937');
         $accent    = !empty($config['accent_color']) ? $config['accent_color']
-                    : (!empty($config['star_color']) ? $config['star_color'] : '#e87010');
+                    : (!empty($config['star_color']) ? $config['star_color'] : '#fbbc04');
         $text_on_header = !empty($config['text_color']) ? $config['text_color'] : '#ffffff';
 
         $card_style  = (isset($config['card_style']) && in_array($config['card_style'], ['border', 'shadow'], true))
