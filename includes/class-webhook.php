@@ -25,6 +25,46 @@ class Superman_Links_Webhook {
 
         // Notify CRM when our plugin is updated
         add_action('upgrader_process_complete', [$this, 'on_plugin_updated'], 10, 2);
+
+        // Self-heal: notify CRM when the API key is regenerated/changed so the
+        // CRM resyncs the key instead of silently 401ing every sync.
+        add_action('update_option_superman_links_api_key', [$this, 'on_api_key_changed'], 10, 2);
+    }
+
+    /**
+     * When the plugin API key changes (Regenerate button or manual edit), tell
+     * the CRM with {old_key, new_key}. The CRM authenticates the rotation by the
+     * OLD key (same trust bar as any sync call) and updates its stored key — so
+     * a regenerated key no longer silently breaks the sync.
+     */
+    public function on_api_key_changed($old_value, $new_value) {
+        // Initial set (empty -> key) is handled by the normal connection flow;
+        // only a genuine rotation (an old key existed and changed) needs resync.
+        if (empty($old_value) || $old_value === $new_value) {
+            return;
+        }
+        if (empty($this->webhook_url) || empty($this->supabase_anon_key)) {
+            return;
+        }
+
+        $payload = [
+            'action' => 'key_rotated',
+            'site_url' => get_site_url(),
+            'api_key' => $new_value, // NEW key
+            'old_key' => $old_value, // previous key — authenticates the rotation
+            'plugin_version' => defined('SUPERMAN_LINKS_VERSION') ? SUPERMAN_LINKS_VERSION : null,
+        ];
+
+        wp_remote_post($this->webhook_url, [
+            'body' => wp_json_encode($payload),
+            'headers' => [
+                'Content-Type' => 'application/json',
+                'Authorization' => 'Bearer ' . $this->supabase_anon_key,
+            ],
+            'timeout' => 10,
+            'blocking' => false,
+            'sslverify' => true,
+        ]);
     }
 
     /**
