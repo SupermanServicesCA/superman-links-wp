@@ -3,7 +3,7 @@
  * Plugin Name: Superman Links
  * Plugin URI: https://github.com/SupermanServicesCA/superman-links-wp
  * Description: REST API bridge for Superman Links CRM - exposes page data, SEO metadata, and Elementor templates.
- * Version: 1.13.0
+ * Version: 1.15.0
  * Author: Superman Services
  * Author URI: https://supermanservices.ca/website-design-and-development/
  * License: GPL v2 or later
@@ -14,7 +14,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('SUPERMAN_LINKS_VERSION', '1.13.0');
+define('SUPERMAN_LINKS_VERSION', '1.15.0');
 define('SUPERMAN_LINKS_PLUGIN_DIR', plugin_dir_path(__FILE__));
 
 // Include required files
@@ -53,14 +53,29 @@ add_action('plugins_loaded', 'superman_links_init');
  * Activation hook
  */
 function superman_links_activate() {
-    // Generate a default API key if none exists
+    // Generate a default API key if none exists. Track whether we minted a FRESH
+    // one so we can tell the CRM (below) — a re-mint after the option was lost
+    // (host migration / restore / reinstall) silently forks the key the CRM
+    // stores and breaks sync until reconciled.
+    $minted_key = null;
     if (!get_option('superman_links_api_key')) {
-        update_option('superman_links_api_key', wp_generate_password(32, false));
+        $minted_key = wp_generate_password(32, false);
+        update_option('superman_links_api_key', $minted_key);
     }
 
     // Set webhook config (stored in DB, not in source code)
     update_option('superman_links_webhook_url', base64_decode('aHR0cHM6Ly93aXJudHNranV1dnFrdnFic2ttYi5zdXBhYmFzZS5jby9mdW5jdGlvbnMvdjEvd29yZHByZXNzLXdlYmhvb2s='));
     update_option('superman_links_supabase_key', base64_decode('ZXlKaGJHY2lPaUpJVXpJMU5pSXNJblI1Y0NJNklrcFhWQ0o5LmV5SnBjM01pT2lKemRYQmhZbUZ6WlNJc0luSmxaaUk2SW5kcGNtNTBjMnRxZFhWMmNXdDJjV0p6YTIxaUlpd2ljbTlzWlNJNkltRnViMjRpTENKcFlYUWlPakUzTmpRNU56RTNPVGdzSW1WNGNDSTZNakE0TURVME56YzVPSDAueERkSXlWczNtTTgyY3ZjMDF1Rld4c1Y1Si1BSXQ4Wk5HSkU3WG1YZ0NCUQ=='));
+
+    // If we just minted a FRESH key, notify the CRM immediately so the drift is
+    // loud, not silent. WP routes a mint into an absent option through add_option
+    // (NOT update_option_*), so the class-webhook self-heal can't observe it; and
+    // the activation hook fires after plugins_loaded already passed, so the
+    // webhook class isn't instantiated yet — hence this inline static call. The
+    // CRM stages it as a PENDING key for human adoption (it never auto-trusts it).
+    if ($minted_key !== null && class_exists('Superman_Links_Webhook')) {
+        Superman_Links_Webhook::notify_key_minted($minted_key);
+    }
 }
 register_activation_hook(__FILE__, 'superman_links_activate');
 

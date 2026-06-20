@@ -68,6 +68,39 @@ class Superman_Links_Webhook {
     }
 
     /**
+     * Tell the CRM a FRESH API key was just minted (e.g. after a host migration
+     * or restore reset the option on a previously-connected site). Called inline
+     * from the activation hook, where this class isn't instantiated yet, so it's
+     * static and re-reads config from options (set moments earlier in activation).
+     * Fire-and-forget; the CRM stages it as a pending key for human adoption and
+     * never auto-trusts it. Distinct from on_api_key_changed() (a rotation of an
+     * EXISTING key, authenticated by the old key) — a fresh mint has no old key.
+     */
+    public static function notify_key_minted($new_key) {
+        $webhook_url  = get_option('superman_links_webhook_url', '');
+        $supabase_key = get_option('superman_links_supabase_key', '');
+        if (empty($webhook_url) || empty($supabase_key) || empty($new_key)) {
+            return;
+        }
+
+        wp_remote_post($webhook_url, [
+            'body' => wp_json_encode([
+                'action' => 'key_minted',
+                'site_url' => get_site_url(),
+                'api_key' => $new_key,
+                'plugin_version' => defined('SUPERMAN_LINKS_VERSION') ? SUPERMAN_LINKS_VERSION : null,
+            ]),
+            'headers' => [
+                'Content-Type' => 'application/json',
+                'Authorization' => 'Bearer ' . $supabase_key,
+            ],
+            'timeout' => 10,
+            'blocking' => false,
+            'sslverify' => true,
+        ]);
+    }
+
+    /**
      * Handle post save
      */
     public function on_post_save($post_id, $post, $update) {

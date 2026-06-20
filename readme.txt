@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.0
 Tested up to: 6.7
-Stable tag: 1.13.0
+Stable tag: 1.15.0
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,9 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 1.15.0 =
+* Notify the CRM immediately when a fresh API key is minted on activation (e.g. after a host migration/restore reset the key), so sync key drift surfaces instantly instead of silently 401ing. The CRM stages the key for human-verified adoption.
 
 = 1.9.0 =
 * Added Review Widget feature - Google Reviews carousel via shortcode
