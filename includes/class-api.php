@@ -211,6 +211,17 @@ class Superman_Links_API {
             'permission_callback' => [$this, 'check_api_key'],
         ]);
 
+        // ==========================================
+        // Blog Post Publishing Endpoint (v1.14.0+)
+        // ==========================================
+
+        // Publish a Content Writer draft as a native Gutenberg/HTML post
+        register_rest_route($this->namespace, '/posts', [
+            'methods' => 'POST',
+            'callback' => [$this, 'create_post'],
+            'permission_callback' => [$this, 'check_api_key'],
+        ]);
+
         // LinkFinder bulk push admin endpoints
         register_rest_route($this->namespace, '/linkfinder/start', [
             'methods'             => 'POST',
@@ -1423,6 +1434,111 @@ class Superman_Links_API {
         }
 
         return $this->apply_elementor_template($post_id, $body, true);
+    }
+
+    /**
+     * Publish a Content Writer draft as a native Gutenberg/HTML post.
+     *
+     * Unlike /elementor/import (which writes JSON to meta and leaves
+     * post_content empty), this writes a real HTML body through
+     * wp_kses_post and returns the live permalink. Idempotent via the
+     * _superman_draft_id post meta tag.
+     */
+    public function create_post($request) {
+        $body = $request->get_json_params();
+
+        $draft_id      = $body['draft_id'] ?? '';
+        $title         = $body['title'] ?? '';
+        $content_html  = $body['content_html'] ?? '';
+        $slug          = $body['slug'] ?? '';
+        $status        = $body['status'] ?? 'draft';
+        $focus_keyword = $body['focus_keyword'] ?? '';
+        $excerpt       = $body['excerpt'] ?? '';
+
+        // Empty-body guard: never create a blank post.
+        if (trim((string) $content_html) === '') {
+            return new WP_Error(
+                'empty_body',
+                __('content_html is required and cannot be empty.', 'superman-links'),
+                ['status' => 400]
+            );
+        }
+
+        // Validate status; default to draft.
+        if (!in_array($status, ['draft', 'publish'], true)) {
+            $status = 'draft';
+        }
+
+        // Server-side idempotency: if a post already carries this draft_id,
+        // return it instead of creating a duplicate. This closes the
+        // WP-success / audit-write-failure window the CRM guard can't.
+        if (!empty($draft_id)) {
+            $existing = get_posts([
+                'post_type'   => 'post',
+                'post_status' => 'any',
+                'numberposts' => 1,
+                'fields'      => 'ids',
+                'meta_key'    => '_superman_draft_id',
+                'meta_value'  => $draft_id,
+            ]);
+
+            if (!empty($existing)) {
+                $existing_id = $existing[0];
+                return rest_ensure_response([
+                    'id'                => $existing_id,
+                    'url'               => get_permalink($existing_id),
+                    'status'            => get_post_status($existing_id),
+                    'already_published' => true,
+                ]);
+            }
+        }
+
+        // Insert the post.
+        $post_data = [
+            'post_type'    => 'post',
+            'post_status'  => $status,
+            'post_title'   => sanitize_text_field($title),
+            'post_content' => wp_kses_post($content_html),
+            'post_excerpt' => sanitize_textarea_field($excerpt),
+        ];
+
+        if (!empty($slug)) {
+            $post_data['post_name'] = sanitize_title($slug);
+        }
+
+        $post_id = wp_insert_post($post_data, true);
+
+        if (is_wp_error($post_id)) {
+            return $post_id;
+        }
+
+        // Tag the post with the draft id for idempotency on re-publish.
+        if (!empty($draft_id)) {
+            update_post_meta($post_id, '_superman_draft_id', sanitize_text_field($draft_id));
+        }
+
+        // Focus keyword: best-effort. If neither Rank Math nor Yoast is active
+        // the helper returns a no_seo_plugin WP_Error — skip the keyword and
+        // still publish (don't fail the post over a missing SEO plugin).
+        if (!empty($focus_keyword)) {
+            $kw_result = $this->set_focus_keyword($post_id, $focus_keyword);
+            if (is_wp_error($kw_result)) {
+                error_log('Superman Links: focus keyword skipped for post ' . $post_id . ' — ' . $kw_result->get_error_message());
+            }
+        }
+
+        // Content push on publish: trigger the LinkFinder push inline so the
+        // outbound links reach the webhook immediately, rather than waiting on
+        // the ~5s WP-Cron event (which lags/stalls on low-traffic donor sites).
+        if (get_post_status($post_id) === 'publish') {
+            $this->linkfinder_push_post($post_id);
+        }
+
+        return rest_ensure_response([
+            'id'     => $post_id,
+            'url'    => get_permalink($post_id),
+            'status' => get_post_status($post_id),
+        ]);
     }
 
     /**

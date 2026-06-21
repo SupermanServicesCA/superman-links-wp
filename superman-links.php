@@ -3,7 +3,7 @@
  * Plugin Name: Superman Links
  * Plugin URI: https://github.com/SupermanServicesCA/superman-links-wp
  * Description: REST API bridge for Superman Links CRM - exposes page data, SEO metadata, and Elementor templates.
- * Version: 1.15.0
+ * Version: 1.16.0
  * Author: Superman Services
  * Author URI: https://supermanservices.ca/website-design-and-development/
  * License: GPL v2 or later
@@ -14,7 +14,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('SUPERMAN_LINKS_VERSION', '1.15.0');
+define('SUPERMAN_LINKS_VERSION', '1.16.0');
 define('SUPERMAN_LINKS_PLUGIN_DIR', plugin_dir_path(__FILE__));
 
 // Include required files
@@ -59,7 +59,24 @@ function superman_links_activate() {
     // stores and breaks sync until reconciled.
     $minted_key = null;
     if (!get_option('superman_links_api_key')) {
-        $minted_key = wp_generate_password(32, false);
+        // DETERMINISTIC mint (drift-immune): derive the key from wp-config.php
+        // salts instead of a fresh random value. wp-config salts (AUTH_KEY /
+        // SECURE_AUTH_KEY) live in the filesystem, NOT in wp_options, so they
+        // survive a wp_options wipe (host migration / DB restore / reinstall).
+        // That means a re-mint reproduces the SAME key — so after the CRM adopts
+        // it once, this site is drift-immune: re-activation yields the identical
+        // key and sync never forks again. Only a migration that ALSO regenerates
+        // the wp-config salts (rare) would produce a new key and re-drift.
+        // We DO NOT touch an already-set key (the !get_option guard above), so
+        // existing sites keep their original random key untouched — this only
+        // affects NEW mints.
+        if (defined('AUTH_KEY') && AUTH_KEY && defined('SECURE_AUTH_KEY') && SECURE_AUTH_KEY) {
+            $minted_key = substr(hash('sha256', AUTH_KEY . SECURE_AUTH_KEY . get_site_url() . 'superman-links-api-key'), 0, 32);
+        } else {
+            // Salts not defined (odd / non-standard install) — preserve the
+            // original behavior so we never fail to mint a usable key.
+            $minted_key = wp_generate_password(32, false);
+        }
         update_option('superman_links_api_key', $minted_key);
     }
 

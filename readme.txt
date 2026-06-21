@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.0
 Tested up to: 6.7
-Stable tag: 1.15.0
+Stable tag: 1.16.0
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,10 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 1.16.0 =
+* Blog publishing: new POST /superman-links/v1/posts endpoint creates a native Gutenberg/HTML post from a Content Writer draft (wp_kses_post sanitized, idempotent via _superman_draft_id, focus keyword to Rank Math/Yoast, inline LinkFinder push on live publish).
+* Sync key drift-immunity: a fresh API key minted on activation is now derived deterministically from the site's wp-config salts instead of random, so a re-mint after a host wipe reproduces the same key (no silent fork). Existing keys are untouched.
 
 = 1.15.0 =
 * Notify the CRM immediately when a fresh API key is minted on activation (e.g. after a host migration/restore reset the key), so sync key drift surfaces instantly instead of silently 401ing. The CRM stages the key for human-verified adoption.
