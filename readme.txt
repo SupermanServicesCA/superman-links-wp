@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.0
 Tested up to: 6.7
-Stable tag: 1.16.0
+Stable tag: 1.16.1
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,9 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 1.16.1 =
+* Blog publishing fix: re-publishing a draft now updates the existing post in place — a draft→live re-publish correctly FLIPS the post to published (and refreshes the body/title) instead of returning the draft unchanged. The slug/permalink is preserved on re-publish so the tracked outbound link is never orphaned. The go-live date is stamped when a draft is first promoted to publish (correct freshness/sitemap ordering), and an already-published post is never silently demoted back to draft.
 
 = 1.16.0 =
 * Blog publishing: new POST /superman-links/v1/posts endpoint creates a native Gutenberg/HTML post from a Content Writer draft (wp_kses_post sanitized, idempotent via _superman_draft_id, focus keyword to Rank Math/Yoast, inline LinkFinder push on live publish).

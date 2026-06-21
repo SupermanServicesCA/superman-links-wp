@@ -1469,9 +1469,13 @@ class Superman_Links_API {
             $status = 'draft';
         }
 
-        // Server-side idempotency: if a post already carries this draft_id,
-        // return it instead of creating a duplicate. This closes the
-        // WP-success / audit-write-failure window the CRM guard can't.
+        // Server-side idempotency + re-publish upsert: if a post already carries
+        // this draft_id, UPDATE it in place rather than creating a duplicate.
+        // Critically, a draft→live re-publish must FLIP the post to 'publish' —
+        // the old code returned the existing draft unchanged, so re-publishing a
+        // drafted post to go live silently left it a draft (and the content never
+        // refreshed). This also closes the WP-success / audit-write-failure window.
+        $existing_id = 0;
         if (!empty($draft_id)) {
             $existing = get_posts([
                 'post_type'   => 'post',
@@ -1481,36 +1485,58 @@ class Superman_Links_API {
                 'meta_key'    => '_superman_draft_id',
                 'meta_value'  => $draft_id,
             ]);
-
             if (!empty($existing)) {
-                $existing_id = $existing[0];
-                return rest_ensure_response([
-                    'id'                => $existing_id,
-                    'url'               => get_permalink($existing_id),
-                    'status'            => get_post_status($existing_id),
-                    'already_published' => true,
-                ]);
+                $existing_id = (int) $existing[0];
             }
         }
 
-        // Insert the post.
         $post_data = [
-            'post_type'    => 'post',
             'post_status'  => $status,
             'post_title'   => sanitize_text_field($title),
             'post_content' => wp_kses_post($content_html),
             'post_excerpt' => sanitize_textarea_field($excerpt),
         ];
 
-        if (!empty($slug)) {
-            $post_data['post_name'] = sanitize_title($slug);
+        if ($existing_id) {
+            // Re-publish: update in place. Deliberately do NOT touch the slug —
+            // the existing permalink is the key the staged tracked link points at,
+            // so re-slugging here would orphan it.
+            $existing_status = get_post_status($existing_id);
+
+            // Never demote an already-published post back to draft via re-publish:
+            // that would dark the public post while its promoted network_link/links
+            // row stays 'live', so the CRM would report a healthy link that 404s.
+            // Unpublishing is not this endpoint's job (do it in WP directly).
+            if ($existing_status === 'publish' && $post_data['post_status'] === 'draft') {
+                $post_data['post_status'] = 'publish';
+            }
+
+            // Stamp the go-live date when a draft is first promoted to publish, so
+            // the post's publish date (and sitemap/feed ordering + freshness
+            // signals) reflects when it actually went live — wp_update_post keeps
+            // the original draft-creation post_date otherwise. Skip when already
+            // published so a content-only refresh doesn't churn the date.
+            if ($existing_status !== 'publish' && $post_data['post_status'] === 'publish') {
+                $post_data['post_date']     = current_time('mysql');
+                $post_data['post_date_gmt'] = current_time('mysql', 1);
+                $post_data['edit_date']     = true;
+            }
+
+            $post_data['ID'] = $existing_id;
+            $result = wp_update_post($post_data, true);
+        } else {
+            $post_data['post_type'] = 'post';
+            if (!empty($slug)) {
+                $post_data['post_name'] = sanitize_title($slug);
+            }
+            $result = wp_insert_post($post_data, true);
         }
 
-        $post_id = wp_insert_post($post_data, true);
-
-        if (is_wp_error($post_id)) {
-            return $post_id;
+        if (is_wp_error($result)) {
+            return $result;
         }
+
+        $post_id = $existing_id ?: (int) $result;
 
         // Tag the post with the draft id for idempotency on re-publish.
         if (!empty($draft_id)) {
@@ -1535,9 +1561,11 @@ class Superman_Links_API {
         }
 
         return rest_ensure_response([
-            'id'     => $post_id,
-            'url'    => get_permalink($post_id),
-            'status' => get_post_status($post_id),
+            'id'                => $post_id,
+            'url'               => get_permalink($post_id),
+            'status'            => get_post_status($post_id),
+            'already_published' => $existing_id ? true : false,
+            'updated'           => $existing_id ? true : false,
         ]);
     }
 
