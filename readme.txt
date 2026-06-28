@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.0
 Tested up to: 6.7
-Stable tag: 1.16.1
+Stable tag: 1.17.0
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,11 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 1.17.0 =
+* On-page/schema capture: LinkFinder pushes now capture the page the way Google sees it — the rendered <head> JSON-LD schema (LocalBusiness/Organization/WebSite/BreadcrumbList + page schema, not just body FAQ), the resolved meta description (including templated descriptions Rank Math generates, which post-meta returns empty), and on-page booleans (tap-to-call, structural NAP, map embed). Hybrid capture: an in-process Rank Math floor (cache-immune) overlaid with the live rendered head via an internal loopback fetch.
+* The internal page-capture fetch now actually bypasses the page cache — the X-Superman-Internal marker is honored (DONOTCACHEPAGE + no-cache headers) and a cache-buster query param forces a fresh render, instead of capturing a FlyingPress/SiteGround cached or challenge copy.
+* Bulk push batch lowered 30 -> 10 per tick to keep each run bounded now that capture does a per-post loopback fetch (avoids shared-host PHP/WP-Cron timeouts).
 
 = 1.16.1 =
 * Blog publishing fix: re-publishing a draft now updates the existing post in place — a draft→live re-publish correctly FLIPS the post to published (and refreshes the body/title) instead of returning the draft unchanged. The slug/permalink is preserved on re-publish so the tracked outbound link is never orphaned. The go-live date is stamped when a draft is first promoted to publish (correct freshness/sitemap ordering), and an already-published post is never silently demoted back to draft.

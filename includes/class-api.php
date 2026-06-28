@@ -34,6 +34,29 @@ class Superman_Links_API {
             }
             return $schedules;
         });
+
+        // Make our own internal page-capture loopback fetch bypass the page cache.
+        // The X-Superman-Internal header was previously SET but never READ (a no-op
+        // label). The on-page signal capture (tap-to-call / NAP / map / rendered
+        // head schema) needs the LIVE rendered page, not a FlyingPress / SiteGround
+        // SuperCacher / WP-Rocket cached or Security-Optimizer challenge copy. When
+        // our marker header is present we declare the request uncacheable as early as
+        // possible (this constructor runs on plugins_loaded) and force no-cache
+        // response headers. Belt-and-suspenders with the cache-buster query param the
+        // fetch appends (fetch_rendered_page_html). Whether a given host's full-page
+        // cache honours this still needs a live probe — see the organic-foundation plan.
+        // Require BOTH our marker header AND our own cache-buster query param so an
+        // external request can't toggle the cache bypass by spoofing the header alone
+        // (our loopback fetch always sends both). Worst case if abused is a per-request
+        // cache miss, not poisoning — but gating on the param closes even that.
+        if (!empty($_SERVER['HTTP_X_SUPERMAN_INTERNAL']) && isset($_GET['superman_nocache'])) {
+            if (!defined('DONOTCACHEPAGE'))   { define('DONOTCACHEPAGE', true); }
+            if (!defined('DONOTCACHEOBJECT')) { define('DONOTCACHEOBJECT', true); }
+            if (!defined('DONOTCACHEDB'))     { define('DONOTCACHEDB', true); }
+            add_action('send_headers', function () {
+                if (function_exists('nocache_headers')) { nocache_headers(); }
+            }, 0);
+        }
     }
 
     /**
@@ -1556,8 +1579,11 @@ class Superman_Links_API {
         // Content push on publish: trigger the LinkFinder push inline so the
         // outbound links reach the webhook immediately, rather than waiting on
         // the ~5s WP-Cron event (which lags/stalls on low-traffic donor sites).
+        // skip_fetch=true: don't run the 6s loopback full-page fetch inside this
+        // foreground REST response — the async save_post push (cron, ~5s later)
+        // captures the full-page on-page/schema signals without blocking publish.
         if (get_post_status($post_id) === 'publish') {
-            $this->linkfinder_push_post($post_id);
+            $this->linkfinder_push_post($post_id, null, true);
         }
 
         return rest_ensure_response([
@@ -1654,13 +1680,265 @@ class Superman_Links_API {
     }
 
     /**
+     * Fetch the FULL rendered page for a post via an internal loopback request.
+     *
+     * Unlike render_post_to_html (which returns post-body / inner <main> only and
+     * throws away the <head>), this returns the entire document so the caller can
+     * read head schema/meta AND header/footer markup (tap-to-call, NAP, map) that
+     * the structured parser strips. Returns '' on any failure — the caller treats
+     * '' as "not measured" and writes the signal booleans NULL, never false.
+     *
+     * Cache handling: appends a unique cache-buster query param (forces a MISS on
+     * caches that key on the full URL) and sends X-Superman-Internal (trips the
+     * DONOTCACHEPAGE bypass wired in the constructor). Short timeout because this
+     * can run inside the bulk tick loop.
+     */
+    private function fetch_rendered_page_html($post_id) {
+        $permalink = get_permalink($post_id);
+        if (!$permalink) {
+            return '';
+        }
+        $bust = (strpos($permalink, '?') === false ? '?' : '&') . 'superman_nocache=' . time();
+        $response = wp_remote_get($permalink . $bust, [
+            'timeout'     => 6,
+            'sslverify'   => false,
+            'redirection' => 2,
+            'headers'     => [ 'X-Superman-Internal' => '1' ],
+        ]);
+        if (is_wp_error($response)) {
+            return '';
+        }
+        $code = wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            return '';
+        }
+        $body = wp_remote_retrieve_body($response);
+        // Validity gate: a real rendered page closes </html>. A cache challenge,
+        // a WAF block, or a truncated response won't — in which case we measured
+        // nothing reliable, so signal it as such (caller writes the fetch-derived
+        // booleans NULL). Schema/meta still fall back to the in-process Rank Math
+        // path so they are never lost to a cache block.
+        if (stripos($body, '</html>') === false || strlen($body) < 512) {
+            return '';
+        }
+        return $body;
+    }
+
+    /**
+     * Pull all ld+json @type strings out of a blob of HTML (head + body), walking
+     * @graph nodes. Returns a flat, de-duplicated array of type strings.
+     */
+    private function extract_ldjson_types($html) {
+        $types = [];
+        if (preg_match_all('/<script[^>]*type=["\']application\/ld\+json["\'][^>]*>(.*?)<\/script>/si', $html, $matches)) {
+            foreach ($matches[1] as $json_str) {
+                $data = json_decode(trim($json_str), true);
+                if (!is_array($data)) {
+                    continue;
+                }
+                // Normalize to a list of schema nodes. A single ld+json block may be a
+                // single object ({@type|@graph}) OR a top-level array of objects
+                // ([{...},{...}]) — handle both, plus a nested @graph in either.
+                $nodes = (isset($data['@type']) || isset($data['@graph'])) ? [$data] : $data;
+                foreach ($nodes as $node) {
+                    if (!is_array($node)) {
+                        continue;
+                    }
+                    if (isset($node['@type'])) {
+                        foreach ((array) $node['@type'] as $t) { $types[] = $t; }
+                    }
+                    if (isset($node['@graph']) && is_array($node['@graph'])) {
+                        foreach ($node['@graph'] as $g) {
+                            if (is_array($g) && isset($g['@type'])) {
+                                foreach ((array) $g['@type'] as $t) { $types[] = $t; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return array_values(array_unique(array_filter($types)));
+    }
+
+    /**
+     * Is any of these schema @types a LocalBusiness (or a known LocalBusiness
+     * subtype for our home-services verticals)?
+     */
+    private function schema_types_have_localbusiness($types) {
+        foreach ($types as $t) {
+            if (stripos($t, 'LocalBusiness') !== false) {
+                return true;
+            }
+            if (in_array($t, [
+                'Plumber', 'HVACBusiness', 'Electrician', 'ElectricalContractor',
+                'GeneralContractor', 'HomeAndConstructionBusiness', 'RoofingContractor',
+                'HousePainter', 'MovingCompany', 'Locksmith', 'ProfessionalService',
+                'CleaningService', 'DryCleaningOrLaundry', 'PestControl',
+            ], true)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Plain visible text of the <body> — strips <script>/<style> and all tags so
+     * heuristics (e.g. postal-code matching) don't fire on minified JS/CSS, asset
+     * hashes, element IDs, or cache-busted URLs that pepper raw HTML.
+     */
+    private function visible_body_text($html) {
+        if (preg_match('/<body\b[^>]*>(.*?)<\/body>/is', $html, $m)) {
+            $html = $m[1];
+        }
+        $html = preg_replace('#<(script|style)\b[^>]*>.*?</\1>#is', ' ', $html);
+        return wp_strip_all_tags($html);
+    }
+
+    /**
+     * Capture the on-page / schema signals that the structured body parser can't
+     * see. Hybrid by signal type (per the organic-foundation plan):
+     *   - rendered_meta_description / schema_types / has_localbusiness_schema:
+     *     prefer the LIVE rendered <head> (most faithful — what Google sees) and
+     *     fall back to the in-process Rank Math values so these are NEVER lost to a
+     *     cache block (cache-immune floor).
+     *   - has_tel_link / has_map_embed / nap_on_page: header/footer markup that has
+     *     no in-process source — only the full-page fetch can see it. NULL when the
+     *     fetch fails (not false), so a cached/blocked page can't fabricate todos.
+     *
+     * $body_types = @types already extracted from the rendered post body (FAQ etc.).
+     * Returns an assoc array of the signal fields for the push payload.
+     */
+    private function capture_rendered_signals($post, $body_types, $skip_fetch = false) {
+        $post_id   = $post->ID;
+        // $skip_fetch is set on foreground REST paths (e.g. inline publish) so a 6s
+        // loopback can't block the response — the async save_post push captures the
+        // full-page signals a few seconds later in cron context.
+        $full_html = $skip_fetch ? '' : $this->fetch_rendered_page_html($post_id);
+        $fetched   = ($full_html !== '');
+
+        // ---- Approach B floor (in-process, cache-immune) -------------------
+        // Rendered meta description: post-meta when set, else the resolved Rank
+        // Math template (this is the gap — post-meta is NULL when templated).
+        $b_desc = get_post_meta($post_id, 'rank_math_description', true);
+        if (!$b_desc && class_exists('RankMath\\Helper')) {
+            $tmpl = \RankMath\Helper::get_settings("titles.pt_{$post->post_type}_description");
+            if ($tmpl) {
+                $b_desc = wp_strip_all_tags(\RankMath\Helper::replace_vars($tmpl, get_post($post_id)));
+            }
+        }
+        if (!$b_desc) {
+            $b_desc = get_post_meta($post_id, '_yoast_wpseo_metadesc', true);
+        }
+
+        // Rank Math sitewide + per-page schema types (Approach B).
+        $b_types     = [];
+        $rm_titles   = get_option('rank-math-options-titles');
+        $rm_general  = get_option('rank-math-options-general');
+        if (is_array($rm_titles)) {
+            $kg = $rm_titles['knowledgegraph_type'] ?? '';
+            if ($kg === 'company')     { $b_types[] = 'Organization'; }
+            elseif ($kg === 'person')  { $b_types[] = 'Person'; }
+            if (!empty($rm_titles['local_business_type'])) {
+                $b_types[] = 'LocalBusiness';
+                $b_types[] = $rm_titles['local_business_type'];
+            }
+        }
+        $b_types[] = 'WebSite'; // Rank Math emits WebSite schema sitewide by default
+        if (is_array($rm_general) && (($rm_general['breadcrumbs'] ?? '') === 'on')) {
+            $b_types[] = 'BreadcrumbList';
+        }
+        // Per-page Rank Math schema blocks (Service / FAQPage / Article / Product ...)
+        $all_meta = get_post_meta($post_id);
+        if (is_array($all_meta)) {
+            foreach ($all_meta as $mk => $mv) {
+                if (strncmp($mk, 'rank_math_schema_', 17) !== 0) {
+                    continue;
+                }
+                $raw = is_array($mv) ? ($mv[0] ?? '') : $mv;
+                $val = maybe_unserialize($raw);
+                if (is_array($val) && !empty($val['@type'])) {
+                    foreach ((array) $val['@type'] as $t) { $b_types[] = $t; }
+                } else {
+                    $suffix = preg_replace('/[-_]\d+$/', '', substr($mk, 17));
+                    if ($suffix) { $b_types[] = $suffix; }
+                }
+            }
+        }
+
+        // ---- Approach A overlay (live head, most faithful) -----------------
+        $head_types = $fetched ? $this->extract_ldjson_types($full_html) : [];
+        $a_desc     = '';
+        if ($fetched && preg_match('/<head\b[^>]*>(.*?)<\/head>/is', $full_html, $hm)) {
+            if (preg_match('/<meta[^>]+name=["\']description["\'][^>]*>/i', $hm[1], $tag)
+                && preg_match('/content=["\'](.*?)["\']/is', $tag[0], $cm)) {
+                $a_desc = trim(html_entity_decode($cm[1], ENT_QUOTES));
+            }
+        }
+
+        // ---- Merge ---------------------------------------------------------
+        // When we fetched the live page, the rendered <head> is the TRUTH: an empty
+        // head means the page genuinely shows no meta description (-> NULL -> a real
+        // gap the strategy should surface). The in-process Rank Math floor ($b_desc)
+        // is used ONLY when we could NOT see the head (fetch failed) as a cache-immune
+        // display fallback — it must never mask a genuinely-empty head, or the
+        // "missing meta description" strategy would under-report. The strategy gates
+        // on head_fetched so a floor value never drives a false "missing".
+        if ($fetched) {
+            $rendered_meta_description = ($a_desc !== '') ? $a_desc : null;
+        } else {
+            $rendered_meta_description = ($b_desc !== '') ? $b_desc : null;
+        }
+
+        $schema_types = array_values(array_unique(array_filter(array_merge(
+            (array) $body_types, $head_types, $b_types
+        ))));
+
+        // has_localbusiness: definitively measurable in-process (RM settings/body) OR
+        // confirmed in the live head — so it's always measured (true/false), never NULL.
+        $has_localbusiness = $this->schema_types_have_localbusiness($schema_types);
+
+        // Header/footer booleans — fetch-only. NULL when the fetch failed (the webhook
+        // then PRESERVES the prior measurement rather than downgrading it to NULL).
+        if ($fetched) {
+            $has_tel_link  = (bool) preg_match('/href=["\']tel:/i', $full_html);
+            $has_map_embed = (bool) preg_match('/<iframe[^>]+src=["\'][^"\']*(google\.com\/maps|maps\.google|maps\.googleapis|\/maps\/embed)/i', $full_html);
+            // Structural NAP heuristic (NOT a canonical-NAP match — that's a Phase 2
+            // CRM-side refinement): a PostalAddress in schema, or a real Canadian postal
+            // code in the VISIBLE body text (not asset hashes / IDs / inline JS) that is
+            // co-located with a tap-to-call link. Case-sensitive with a valid CA
+            // first-letter class so minified tokens like "a1b2c3" can't false-positive.
+            $visible_text     = $this->visible_body_text($full_html);
+            $has_postal_addr  = (stripos($full_html, 'PostalAddress') !== false);
+            $has_ca_postal    = (bool) preg_match('/\b[ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z][ -]?\d[ABCEGHJ-NPRSTV-Z]\d\b/', $visible_text);
+            $nap_on_page      = $has_postal_addr || ($has_tel_link && $has_ca_postal);
+        } else {
+            $has_tel_link  = null;
+            $has_map_embed = null;
+            $nap_on_page   = null;
+        }
+
+        return [
+            'rendered_meta_description' => $rendered_meta_description,
+            'schema_types'              => $schema_types,
+            'has_localbusiness_schema'  => $has_localbusiness,
+            'has_tel_link'              => $has_tel_link,
+            'has_map_embed'             => $has_map_embed,
+            'nap_on_page'               => $nap_on_page,
+            // Did the loopback full-page fetch succeed on THIS push? Drives the
+            // webhook's preserve-vs-write decision and gates the meta-description gap
+            // strategy so a fetch failure is never read as "genuinely missing".
+            'head_fetched'              => $fetched,
+        ];
+    }
+
+    /**
      * Run extraction locally for one post and POST the structured payload to
      * the Supabase wordpress-webhook endpoint. Returns true on 2xx, false otherwise.
      *
      * If $session_id is provided, the webhook treats this as part of an active
      * bulk push session and bumps the sync counters.
      */
-    public function linkfinder_push_post($post_id, $session_id = null) {
+    public function linkfinder_push_post($post_id, $session_id = null, $skip_fetch = false) {
         $post = get_post($post_id);
         if (!$post || $post->post_status !== 'publish') {
             return false;
@@ -1733,6 +2011,15 @@ class Superman_Links_API {
             $schema_types = array_unique($schema_types);
         }
 
+        // Capture the full-page on-page/schema signals the body parser can't see
+        // (rendered head schema + meta, tap-to-call / NAP / map embed). Hybrid: an
+        // in-process Rank Math floor (cache-immune) overlaid with the live rendered
+        // <head> when the loopback fetch succeeds. signals_schema_version is ALWAYS
+        // sent so the webhook stamps signals_captured_at off the sentinel — never off
+        // a boolean's truthiness (a measured has_tel_link=false must still count as
+        // measured). A NULL boolean means the fetch couldn't be trusted (not absent).
+        $signals = $this->capture_rendered_signals($post, array_values($schema_types), $skip_fetch);
+
         $payload = [
             'action'   => 'linkfinder_page_push',
             'site_url' => $site_url,
@@ -1755,7 +2042,17 @@ class Superman_Links_API {
                 'meta_description'  => $meta_description,
                 'meta_robots'       => $meta_robots,
                 'canonical_url'     => $canonical_url,
-                'schema_types'      => array_values($schema_types),
+                'schema_types'      => $signals['schema_types'],
+                // Phase 1 full-page on-page/schema capture (v1.17.0). The webhook
+                // routes these to a split UPDATE gated on signals_schema_version so a
+                // versionless (old-plugin) push can't null a prior capture.
+                'rendered_meta_description' => $signals['rendered_meta_description'],
+                'has_localbusiness_schema'  => $signals['has_localbusiness_schema'],
+                'has_tel_link'              => $signals['has_tel_link'],
+                'has_map_embed'             => $signals['has_map_embed'],
+                'nap_on_page'               => $signals['nap_on_page'],
+                'head_fetched'              => $signals['head_fetched'],
+                'signals_schema_version'    => 1,
             ],
         ];
         if ($session_id) {
@@ -1884,8 +2181,14 @@ class Superman_Links_API {
     }
 
     /**
-     * Process up to 30 pages from the bulk push queue. Called by WP-Cron AND
+     * Process up to 10 pages from the bulk push queue. Called by WP-Cron AND
      * by the admin page JS polling (so the queue keeps moving even if WP-Cron stalls).
+     *
+     * Batch lowered 30 -> 10 in v1.17.0: each push now does a per-post loopback
+     * full-page fetch (on-page signal capture), so a 30-post batch could block for
+     * minutes and trip PHP max_execution_time / WP-Cron timeouts on shared hosting
+     * (SiteGround). Smaller batches + a short fetch timeout keep each tick bounded;
+     * the JS poller and WP-Cron both advance the queue so total throughput is fine.
      */
     public function linkfinder_bulk_push_tick() {
         $queue = get_option('superman_linkfinder_push_queue');
@@ -1894,7 +2197,7 @@ class Superman_Links_API {
             return;
         }
 
-        $batch = array_splice($queue['post_ids'], 0, 30);
+        $batch = array_splice($queue['post_ids'], 0, 10);
         foreach ($batch as $post_id) {
             $this->linkfinder_push_post($post_id, $queue['session_id']);
             usleep(200000); // 200ms between pushes
