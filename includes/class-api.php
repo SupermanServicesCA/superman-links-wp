@@ -2797,6 +2797,39 @@ class Superman_Links_API {
     }
 
     /**
+     * Diagnostic: is the context sentence un-matchable because part of it is
+     * ALREADY a link? wrap_anchor_in_html() excludes text inside <a> tags, so a
+     * sentence whose anchor (or any phrase) is already linked can never match and
+     * returns null. Used only to produce an accurate error message — not for the
+     * insert itself. Returns true if any existing <a> text sits inside $context.
+     */
+    private function sentence_overlaps_existing_link($html, $context) {
+        if (empty($html) || empty($context)) {
+            return false;
+        }
+        $doc = new DOMDocument();
+        libxml_use_internal_errors(true);
+        $doc->loadHTML(
+            '<?xml encoding="UTF-8"?><div id="superman-root">' . $html . '</div>',
+            LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD
+        );
+        libxml_clear_errors();
+        $xpath = new DOMXPath($doc);
+        $context_norm = strtolower($this->normalize_whitespace($context));
+        if ($context_norm === '') {
+            return false;
+        }
+        foreach ($xpath->query('//a') as $a) {
+            $atext = strtolower($this->normalize_whitespace($a->textContent));
+            if (strlen($atext) > 2 &&
+                (strpos($context_norm, $atext) !== false || strpos($atext, $context_norm) !== false)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Extract links from HTML string (shared helper for content + widgets)
      */
     private function extract_links_from_html($html, $site_host) {
@@ -3054,10 +3087,18 @@ class Superman_Links_API {
                 }
                 return ['mode' => 'wrap'];
             }
-            // Strict mode: context was provided but couldn't be located
+            // Strict mode: context was provided but the wrap failed. Distinguish the
+            // two real causes so operators don't chase a phantom "stale index".
+            if ($this->sentence_overlaps_existing_link($post->post_content, $match_context)) {
+                return new WP_Error(
+                    'anchor_already_linked',
+                    __('That sentence already contains a link on this page, so the anchor cannot be wrapped (the plugin never nests links). Nothing was changed — edit the page manually if you want to repoint the existing link.', 'superman-links'),
+                    ['status' => 422]
+                );
+            }
             return new WP_Error(
                 'context_not_found',
-                __('Could not find that sentence in the page content. The LinkFinder index may be stale — re-sync this site from the WordPress admin.', 'superman-links'),
+                __('Could not locate that sentence in the page content. The page may use a builder/shortcode that stores text differently than it renders, or the content changed since the last sync.', 'superman-links'),
                 ['status' => 422]
             );
         }

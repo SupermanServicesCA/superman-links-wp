@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.0
 Tested up to: 6.7
-Stable tag: 1.17.0
+Stable tag: 1.18.0
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,9 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 1.18.0 =
+* Internal-link insert: clearer 422 errors. When the in-place wrap can't be done because the sentence already contains a link (the plugin never nests links), it now returns a distinct "anchor already linked" message instead of the misleading "LinkFinder index may be stale — re-sync." The genuinely-missing case is reworded to point at builder/shortcode storage or content drift, so operators stop chasing phantom re-syncs.
 
 = 1.17.0 =
 * On-page/schema capture: LinkFinder pushes now capture the page the way Google sees it — the rendered <head> JSON-LD schema (LocalBusiness/Organization/WebSite/BreadcrumbList + page schema, not just body FAQ), the resolved meta description (including templated descriptions Rank Math generates, which post-meta returns empty), and on-page booleans (tap-to-call, structural NAP, map embed). Hybrid capture: an in-process Rank Math floor (cache-immune) overlaid with the live rendered head via an internal loopback fetch.
