@@ -3,12 +3,12 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.0
 Tested up to: 6.7
-Stable tag: 1.18.0
+Stable tag: 2.0.0
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-REST API bridge for Superman Links CRM - exposes page data, SEO metadata, and Elementor templates.
+Your bridge to Superman Links, courtesy of Superman SEO.
 
 == Description ==
 
@@ -44,6 +44,9 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 2.0.0 =
+* Rebrand: plugin description is now "Your bridge to Superman Links, courtesy of Superman SEO." Removed the chatty admin helper paragraphs from the settings page (section blurb, API-key helper text, and the LinkFinder Sync description) for a cleaner admin UI. No functional changes.
 
 = 1.18.0 =
 * Internal-link insert: clearer 422 errors. When the in-place wrap can't be done because the sentence already contains a link (the plugin never nests links), it now returns a distinct "anchor already linked" message instead of the misleading "LinkFinder index may be stale — re-sync." The genuinely-missing case is reworded to point at builder/shortcode storage or content drift, so operators stop chasing phantom re-syncs.

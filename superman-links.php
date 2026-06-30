@@ -2,8 +2,8 @@
 /**
  * Plugin Name: Superman Links
  * Plugin URI: https://github.com/SupermanServicesCA/superman-links-wp
- * Description: REST API bridge for Superman Links CRM - exposes page data, SEO metadata, and Elementor templates.
- * Version: 1.18.0
+ * Description: Your bridge to Superman Links, courtesy of Superman SEO.
+ * Version: 2.0.0
  * Author: Superman Services
  * Author URI: https://supermanservices.ca/website-design-and-development/
  * License: GPL v2 or later
@@ -14,7 +14,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('SUPERMAN_LINKS_VERSION', '1.18.0');
+define('SUPERMAN_LINKS_VERSION', '2.0.0');
 define('SUPERMAN_LINKS_PLUGIN_DIR', plugin_dir_path(__FILE__));
 
 // Include required files

@@ -56,7 +56,6 @@ class Superman_Links_Settings {
      * Section description
      */
     public function section_callback() {
-        echo '<p>' . __('Configure your Superman Links CRM integration settings. Auto-sync is always enabled - any changes to post titles or focus keywords will be automatically pushed to Links.', 'superman-links') . '</p>';
     }
 
     /**
@@ -75,9 +74,6 @@ class Superman_Links_Settings {
         <button type="button" class="button" onclick="regenerateApiKey()">
             <?php _e('Regenerate', 'superman-links'); ?>
         </button>
-        <p class="description">
-            <?php _e('Use this API key in your Superman Links CRM to authenticate requests.', 'superman-links'); ?>
-        </p>
         <script>
         function regenerateApiKey() {
             if (confirm('<?php _e('Are you sure you want to regenerate the API key? The old key will stop working.', 'superman-links'); ?>')) {
@@ -127,11 +123,6 @@ class Superman_Links_Settings {
         ?>
         <hr style="margin: 2em 0;" />
         <h2 id="linkfinder-sync">LinkFinder Sync</h2>
-        <p>
-            Push all published pages to Superman Links CRM for anchor text search.
-            Pages saved going forward sync automatically &mdash; only run this for the
-            initial bulk import or after a content migration.
-        </p>
 
         <div id="superman-linkfinder-status" style="margin: 1em 0;">Loading&hellip;</div>
 
