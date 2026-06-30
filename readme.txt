@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.0
 Tested up to: 6.7
-Stable tag: 2.0.0
+Stable tag: 2.1.0
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,9 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 2.1.0 =
+* New GET /redirects endpoint exposes active RankMath redirects (exact-match sources) so the CRM's Content Silos can track + auto-follow slug-change redirects. Returns gracefully on sites without RankMath. No effect on existing behavior.
 
 = 2.0.0 =
 * Rebrand: plugin description is now "Your bridge to Superman Links, courtesy of Superman SEO." Removed the chatty admin helper paragraphs from the settings page (section blurb, API-key helper text, and the LinkFinder Sync description) for a cleaner admin UI. No functional changes.

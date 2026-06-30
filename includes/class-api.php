@@ -375,6 +375,13 @@ class Superman_Links_API {
             'permission_callback' => '__return_true',
         ]);
 
+        // RankMath active redirects (for Content Silos redirect tracking)
+        register_rest_route($this->namespace, '/redirects', [
+            'methods' => 'GET',
+            'callback' => [$this, 'get_rankmath_redirects'],
+            'permission_callback' => [$this, 'check_api_key'],
+        ]);
+
         // Elementor capabilities (Pro status, available widgets, Site Kit snapshot)
         register_rest_route($this->namespace, '/elementor/capabilities', [
             'methods' => 'GET',
@@ -3252,6 +3259,77 @@ class Superman_Links_API {
     /**
      * Check if Internal Link Juicer is active
      */
+    /**
+     * Resolve a RankMath redirect pattern/target to a full URL. RankMath stores
+     * sources/targets as either absolute URLs or home-relative paths.
+     */
+    private function superman_resolve_url($value) {
+        $value = trim((string) $value);
+        if ($value === '') {
+            return '';
+        }
+        if (preg_match('#^https?://#i', $value)) {
+            return $value;
+        }
+        return home_url('/' . ltrim($value, '/'));
+    }
+
+    /**
+     * GET /redirects — active RankMath redirects, exact-match sources only.
+     *
+     * Returns gracefully ({redirects: [], rankmath: false}) when RankMath / its
+     * redirections table is absent, so a RankMath-less site is a clean no-op rather
+     * than a SQL error. Only `comparison='exact'` sources are emitted — regex/contains/
+     * start/end patterns don't map 1:1 to a single page URL (v1 limit). The CRM matches
+     * each `source` URL to a content-silo node and follows it to `url_to`.
+     */
+    public function get_rankmath_redirects($request) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'rank_math_redirections';
+
+        $table_exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+        if (!$table_exists) {
+            return rest_ensure_response(['redirects' => [], 'rankmath' => false, 'count' => 0]);
+        }
+
+        $rows = $wpdb->get_results(
+            "SELECT id, sources, url_to, header_code, status FROM `{$table}` WHERE status = 'active'"
+        );
+
+        $out = [];
+        foreach ((array) $rows as $row) {
+            $sources = maybe_unserialize($row->sources);
+            if (!is_array($sources)) {
+                continue;
+            }
+            $target = $this->superman_resolve_url($row->url_to);
+            if ($target === '') {
+                continue;
+            }
+            foreach ($sources as $src) {
+                if (!is_array($src)) {
+                    continue;
+                }
+                $comparison = isset($src['comparison']) ? $src['comparison'] : '';
+                $pattern = isset($src['pattern']) ? $src['pattern'] : '';
+                if ($comparison !== 'exact' || $pattern === '') {
+                    continue;
+                }
+                $source_url = $this->superman_resolve_url($pattern);
+                if ($source_url === '' || $source_url === $target) {
+                    continue; // skip self-referential / unresolved
+                }
+                $out[] = [
+                    'source' => $source_url,
+                    'url_to' => $target,
+                    'header_code' => isset($row->header_code) ? (string) $row->header_code : '301',
+                ];
+            }
+        }
+
+        return rest_ensure_response(['redirects' => $out, 'rankmath' => true, 'count' => count($out)]);
+    }
+
     private function is_ilj_active() {
         return defined('ILJ_VERSION') || is_plugin_active('internal-links/wp-internal-linkjuicer.php');
     }
