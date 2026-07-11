@@ -29,6 +29,16 @@ class Superman_Links_Webhook {
         // Self-heal: notify CRM when the API key is regenerated/changed so the
         // CRM resyncs the key instead of silently 401ing every sync.
         add_action('update_option_superman_links_api_key', [$this, 'on_api_key_changed'], 10, 2);
+
+        // RankMath redirect sync (v2.2.0): push the site's full active redirect set to the CRM
+        // (OUTBOUND → sidesteps SiteGround's Anti-Bot AI that 403s an inbound datacenter pull).
+        // Hash-gated so it only sends when the set changes. Hourly cron = reliable backstop +
+        // backfill (first tick after this version installs pushes everything); the save_post
+        // piggyback below makes the common case (a slug change that creates a redirect) instant.
+        add_action('superman_links_rankmath_cron', [$this, 'push_rankmath_cron']);
+        if (!wp_next_scheduled('superman_links_rankmath_cron')) {
+            wp_schedule_event(time() + 300, 'hourly', 'superman_links_rankmath_cron');
+        }
     }
 
     /**
@@ -132,6 +142,10 @@ class Superman_Links_Webhook {
 
         // Send the webhook
         $this->send_webhook('post_updated', $post_id, $post);
+
+        // A slug change usually creates a RankMath redirect in the same request — push if the
+        // redirect set changed (hash-gated, so this is a cheap no-op when nothing changed).
+        $this->maybe_push_rankmath_redirects();
     }
 
     /**
@@ -272,5 +286,114 @@ class Superman_Links_Webhook {
         }
 
         return $focus_keyword ?: null;
+    }
+
+    /**
+     * Cron callback — push RankMath redirects if the set changed since the last push.
+     */
+    public function push_rankmath_cron() {
+        $this->maybe_push_rankmath_redirects(false);
+    }
+
+    /**
+     * Push the site's full active RankMath redirect set to the CRM. Hash-gated: only sends when
+     * the set changed since the last SUCCESSFUL push (the stored hash advances only on a 2xx, so
+     * a failed push retries next tick). $force = send regardless (unused today; reserved).
+     */
+    public function maybe_push_rankmath_redirects($force = false) {
+        $api_key = get_option('superman_links_api_key', '');
+        if (empty($api_key) || empty($this->webhook_url) || empty($this->supabase_anon_key)) {
+            return;
+        }
+
+        $redirects = $this->read_rankmath_redirects();
+        $hash = md5(wp_json_encode($redirects));
+        if (!$force && $hash === get_option('superman_links_rankmath_hash', '')) {
+            return; // unchanged since the last push — nothing to do
+        }
+
+        $payload = [
+            'action' => 'rankmath_redirects',
+            'site_url' => get_site_url(),
+            'api_key' => $api_key,
+            'plugin_version' => defined('SUPERMAN_LINKS_VERSION') ? SUPERMAN_LINKS_VERSION : null,
+            'redirects' => $redirects,
+        ];
+
+        $response = wp_remote_post($this->webhook_url, [
+            'body' => wp_json_encode($payload),
+            'headers' => [
+                'Content-Type' => 'application/json',
+                'Authorization' => 'Bearer ' . $this->supabase_anon_key,
+            ],
+            'timeout' => 15,
+            'blocking' => true,
+            'sslverify' => true,
+        ]);
+
+        if (!is_wp_error($response)) {
+            $code = wp_remote_retrieve_response_code($response);
+            if ($code >= 200 && $code < 300) {
+                update_option('superman_links_rankmath_hash', $hash, false);
+            }
+        }
+    }
+
+    /**
+     * Read the site's active RankMath redirects (exact-match sources only) as a plain array of
+     * {source, url_to, header_code}. Mirrors GET /redirects in class-api.php; returns [] when
+     * RankMath / its table is absent (a graceful no-op push that reconciles-clears stale data).
+     */
+    private function read_rankmath_redirects() {
+        global $wpdb;
+        $table = $wpdb->prefix . 'rank_math_redirections';
+        $exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+        if (!$exists) {
+            return [];
+        }
+
+        $rows = $wpdb->get_results("SELECT sources, url_to, header_code, status FROM `{$table}` WHERE status = 'active'");
+        $out = [];
+        foreach ((array) $rows as $row) {
+            $sources = maybe_unserialize($row->sources);
+            if (!is_array($sources)) {
+                continue;
+            }
+            $target = $this->resolve_redirect_url($row->url_to);
+            if ($target === '') {
+                continue;
+            }
+            foreach ($sources as $src) {
+                if (!is_array($src)) {
+                    continue;
+                }
+                $comparison = isset($src['comparison']) ? $src['comparison'] : '';
+                $pattern = isset($src['pattern']) ? $src['pattern'] : '';
+                if ($comparison !== 'exact' || $pattern === '') {
+                    continue;
+                }
+                $source_url = $this->resolve_redirect_url($pattern);
+                if ($source_url === '' || $source_url === $target) {
+                    continue; // skip unresolved / self-referential
+                }
+                $out[] = [
+                    'source' => $source_url,
+                    'url_to' => $target,
+                    'header_code' => isset($row->header_code) ? (string) $row->header_code : '301',
+                ];
+            }
+        }
+        return $out;
+    }
+
+    private function resolve_redirect_url($value) {
+        $value = trim((string) $value);
+        if ($value === '') {
+            return '';
+        }
+        if (preg_match('#^https?://#i', $value)) {
+            return $value;
+        }
+        return home_url('/' . ltrim($value, '/'));
     }
 }

@@ -3,7 +3,7 @@
  * Plugin Name: Superman Links
  * Plugin URI: https://github.com/SupermanServicesCA/superman-links-wp
  * Description: Your bridge to Superman Links, courtesy of Superman SEO.
- * Version: 2.1.0
+ * Version: 2.2.0
  * Author: Superman Services
  * Author URI: https://supermanservices.ca/website-design-and-development/
  * License: GPL v2 or later
@@ -14,7 +14,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('SUPERMAN_LINKS_VERSION', '2.1.0');
+define('SUPERMAN_LINKS_VERSION', '2.2.0');
 define('SUPERMAN_LINKS_PLUGIN_DIR', plugin_dir_path(__FILE__));
 
 // Include required files
@@ -95,6 +95,14 @@ function superman_links_activate() {
     }
 }
 register_activation_hook(__FILE__, 'superman_links_activate');
+
+/**
+ * On deactivation, clear the RankMath redirect-sync cron event so it doesn't linger.
+ */
+function superman_links_deactivate() {
+    wp_clear_scheduled_hook('superman_links_rankmath_cron');
+}
+register_deactivation_hook(__FILE__, 'superman_links_deactivate');
 
 /**
  * Add settings link on plugin page
