@@ -2450,7 +2450,10 @@ class Superman_Links_API {
                 $data = is_string($elementor_data) ? json_decode($elementor_data, true) : $elementor_data;
                 if (is_array($data)) {
                     if ($this->unwrap_in_elementor_text_editors($data, $target_url)) {
-                        update_post_meta($source_post_id, '_elementor_data', wp_json_encode($data));
+                        // wp_slash() is load-bearing: update_post_meta() unslashes its input,
+                        // so raw wp_json_encode() output loses the \" escapes inside widget
+                        // HTML and corrupts _elementor_data (see v1.8.1 / v2.2.1).
+                        update_post_meta($source_post_id, '_elementor_data', wp_slash(wp_json_encode($data)));
                         $this->regenerate_elementor_css($source_post_id);
                         $unwrapped_anywhere = true;
                     }
@@ -3148,7 +3151,8 @@ class Superman_Links_API {
         if (!empty($match_context)) {
             $wrapped = $this->wrap_in_elementor_text_editors($data, $match_context, $anchor_text, $target_url);
             if ($wrapped) {
-                update_post_meta($post_id, '_elementor_data', wp_json_encode($data));
+                // wp_slash() is load-bearing — see delete path / v2.2.1 note.
+                update_post_meta($post_id, '_elementor_data', wp_slash(wp_json_encode($data)));
                 $this->regenerate_elementor_css($post_id);
                 return ['mode' => 'wrap'];
             }
@@ -3171,7 +3175,8 @@ class Superman_Links_API {
             return $this->insert_link_standard($post_id, $target_url, $anchor_text, $match_context);
         }
 
-        update_post_meta($post_id, '_elementor_data', wp_json_encode($data));
+        // wp_slash() is load-bearing — see wrap path above / v2.2.1 note.
+        update_post_meta($post_id, '_elementor_data', wp_slash(wp_json_encode($data)));
         $this->regenerate_elementor_css($post_id);
 
         return ['mode' => 'append'];
