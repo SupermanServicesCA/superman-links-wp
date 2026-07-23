@@ -1297,7 +1297,9 @@ class Superman_Links_API {
             );
         }
 
-        if (!$this->is_elementor_post($post_id)) {
+        // Revisions carry copied Elementor meta but may lack _elementor_edit_mode;
+        // allow them through so corrupted-data forensics can read revision meta.
+        if ($post->post_type !== 'revision' && !$this->is_elementor_post($post_id)) {
             return new WP_Error(
                 'not_elementor',
                 __('This page is not built with Elementor.', 'superman-links'),
@@ -1314,8 +1316,16 @@ class Superman_Links_API {
 
         // Parse elementor_data if it's a string
         $parsed_data = null;
+        $data_raw_b64 = null;
         if (!empty($elementor_data)) {
             $parsed_data = is_string($elementor_data) ? json_decode($elementor_data, true) : $elementor_data;
+            // Corruption forensics: when the stored meta exists but doesn't decode
+            // (e.g. the pre-v2.2.1 unslashed-write corruption), expose the raw
+            // string so the caller can attempt an offline repair. Base64 keeps the
+            // broken JSON from mangling this response's own encoding.
+            if ($parsed_data === null && is_string($elementor_data)) {
+                $data_raw_b64 = base64_encode($elementor_data);
+            }
         }
 
         // Parse page_settings if it's a string
@@ -1344,6 +1354,7 @@ class Superman_Links_API {
             'elementor' => [
                 'version' => $elementor_version,
                 'data' => $parsed_data,
+                'data_raw_b64' => $data_raw_b64,
                 'page_settings' => $parsed_settings,
                 'css' => $elementor_css,
             ],
