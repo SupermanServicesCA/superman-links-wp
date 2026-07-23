@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.0
 Tested up to: 6.7
-Stable tag: 2.2.2
+Stable tag: 2.2.3
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,9 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 2.2.3 =
+* FIX: is_elementor_post() now returns false when the Elementor plugin isn't active. Previously a stale _elementor_edit_mode meta (left over from a past builder) routed internal-link inserts/deletes into a vestigial _elementor_data blob that never renders — a silent phantom insert (claritypest incident). Inserts on such pages now correctly take the post_content path.
 
 = 2.2.2 =
 * GET /elementor/:id now returns data_raw_b64 (base64 of the stored _elementor_data string) whenever the meta exists but fails json_decode, and accepts revision IDs — forensics support for repairing pages corrupted by the pre-v2.2.1 unslashed writes. Read-only, no behavior change on healthy pages.

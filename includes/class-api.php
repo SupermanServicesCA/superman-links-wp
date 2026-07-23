@@ -948,6 +948,13 @@ class Superman_Links_API {
      * Check if a post is built with Elementor
      */
     private function is_elementor_post($post_id) {
+        // A page cannot be "an Elementor post" on a site where Elementor isn't
+        // running — stale _elementor_edit_mode meta (left from a past builder)
+        // otherwise routes internal-link writes into a vestigial _elementor_data
+        // blob that never renders (silent phantom inserts; claritypest incident).
+        if (!$this->is_elementor_active()) {
+            return false;
+        }
         $edit_mode = get_post_meta($post_id, '_elementor_edit_mode', true);
         return $edit_mode === 'builder';
     }
