@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.0
 Tested up to: 6.7
-Stable tag: 2.3.0
+Stable tag: 2.3.1
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,10 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 2.3.1 =
+* FIX (follow-up to 2.3.0): re-inserting a link that had previously been placed as a "phantom" is no longer blocked. A phantom left its anchor in post_content, which the duplicate check counted as "link already exists" — so the retry that 2.3.0 exists to enable returned 409. On a page with an Elementor tree, post_content is no longer consulted for that check: it isn't rendered, so a URL sitting there is stale debris, not a link on the page.
+* FIX: the duplicate check never actually worked on Elementor pages. _elementor_data is JSON, where wp_json_encode escapes forward slashes, so a stored link reads https:\/\/example.com\/ and a plain search for the raw URL never matched. (It appeared to work before 2.2.1 only because the unslashed writes stripped those escapes.) Both forms are now checked, so inserting the same target twice into a page is properly rejected.
 
 = 2.3.0 =
 * CRITICAL FIX: internal-link inserts can no longer create "phantom" links on Elementor pages — links the CRM records as live that never render. Elementor paints _elementor_data, not post_content, but three paths silently wrote post_content and returned success: a walk that found no text-editor widget, an unparseable _elementor_data, and the no-context "Related:" append when the page has no text widget (that one phantomed every time). All three now return 422 and write nothing. The rule is absolute: on an Elementor page with a valid, non-empty element tree, post_content is never written.

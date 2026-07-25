@@ -2399,13 +2399,30 @@ class Superman_Links_API {
 
         // Check if link already exists in content or Elementor data
         $is_elementor = $this->is_elementor_post($source_post_id);
-        $content_has_link = strpos($post->post_content, $target_url) !== false;
         $elementor_has_link = false;
+        $tree_present = false;
 
         if ($is_elementor) {
             $elementor_data = get_post_meta($source_post_id, '_elementor_data', true);
-            $elementor_has_link = !empty($elementor_data) && strpos($elementor_data, $target_url) !== false;
+            $tree_present = !empty($elementor_data);
+            // _elementor_data is stored as JSON, and wp_json_encode() escapes
+            // forward slashes — a correctly-stored URL reads as
+            // https:\/\/example.com\/page\/, so a plain strpos for the raw URL
+            // never matches. (It only appeared to work before v2.2.1, when the
+            // unslashed writes stripped those escapes.) Check both forms.
+            $elementor_has_link = $tree_present && (
+                strpos($elementor_data, $target_url) !== false ||
+                strpos($elementor_data, str_replace('/', '\\/', $target_url)) !== false
+            );
         }
+
+        // A page with an Elementor tree does not render post_content, so a URL
+        // sitting there is stale debris — not a link that exists on the page.
+        // Almost always it is a pre-v2.3.0 phantom insert. Counting it would
+        // return 409 link_exists and block the retry that v2.3.0 exists to
+        // enable, which would make every historical phantom unfixable through
+        // the CRM. Dedup against the tree only in that case.
+        $content_has_link = !$tree_present && strpos($post->post_content, $target_url) !== false;
 
         if ($content_has_link || $elementor_has_link) {
             return new WP_Error(
