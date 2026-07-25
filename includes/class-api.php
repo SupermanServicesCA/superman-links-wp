@@ -3303,6 +3303,18 @@ class Superman_Links_API {
      * widgets the recursive walk already reaches. Until a dump confirms it,
      * toggle content returns a clean 422 instead of a phantom.
      */
+    /**
+     * Does this HTML fragment's plain text contain the context sentence?
+     * Whitespace-normalised and case-insensitive; tags become spaces so
+     * "<p>a</p><p>b</p>" reads as "a b", not "ab". Diagnostic use only.
+     */
+    private function html_text_contains($html, $context) {
+        $needle = strtolower($this->normalize_whitespace($context));
+        if ($needle === '') return false;
+        $text = strtolower($this->normalize_whitespace(preg_replace('/<[^>]*>/', ' ', $html)));
+        return strpos($text, $needle) !== false;
+    }
+
     private function internal_link_wrappable_fields($widget_type) {
         switch ($widget_type) {
             case 'text-editor':
@@ -3359,7 +3371,18 @@ class Superman_Links_API {
             foreach ($fields as $field) {
                 $html = $el['settings'][$field] ?? '';
                 if (!is_string($html) || $html === '') continue;
-                $visited_html[] = $html;
+                // Collect ONLY widgets whose text actually contains the context
+                // sentence — these are the candidates for the "already linked"
+                // diagnostic. Collecting every widget we merely looked at makes
+                // that diagnostic fire on any unrelated link elsewhere on the
+                // page whose anchor text happens to be a substring of the
+                // sentence (e.g. a "spider" link vs. "…spider control…").
+                // Note this deliberately reads text INSIDE <a> too: wrap fails
+                // with the context present precisely when part of the sentence
+                // is already inside a link.
+                if ($this->html_text_contains($html, $context)) {
+                    $visited_html[] = $html;
+                }
                 $wrapped = $this->wrap_anchor_in_html($html, $context, $anchor_text, $target_url);
                 if ($wrapped !== null) {
                     $el['settings'][$field] = $wrapped;

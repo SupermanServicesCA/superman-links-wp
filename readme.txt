@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.0
 Tested up to: 6.7
-Stable tag: 2.3.1
+Stable tag: 2.3.2
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,9 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 2.3.2 =
+* FIX (follow-up to 2.3.0): the "that sentence is already linked" error could fire on sentences that are not linked at all. The check looked at every text widget on the page, so any unrelated link whose anchor text happened to be a substring of the sentence (e.g. a "spider" link vs. the sentence "...spider control...") triggered it. It is now scoped to the widget that actually contains the sentence. Nothing was ever written incorrectly — this only affected which of two 422 messages you were shown.
 
 = 2.3.1 =
 * FIX (follow-up to 2.3.0): re-inserting a link that had previously been placed as a "phantom" is no longer blocked. A phantom left its anchor in post_content, which the duplicate check counted as "link already exists" — so the retry that 2.3.0 exists to enable returned 409. On a page with an Elementor tree, post_content is no longer consulted for that check: it isn't rendered, so a URL sitting there is stale debris, not a link on the page.
