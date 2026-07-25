@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.0
 Tested up to: 6.7
-Stable tag: 2.2.3
+Stable tag: 2.3.0
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,13 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 2.3.0 =
+* CRITICAL FIX: internal-link inserts can no longer create "phantom" links on Elementor pages — links the CRM records as live that never render. Elementor paints _elementor_data, not post_content, but three paths silently wrote post_content and returned success: a walk that found no text-editor widget, an unparseable _elementor_data, and the no-context "Related:" append when the page has no text widget (that one phantomed every time). All three now return 422 and write nothing. The rule is absolute: on an Elementor page with a valid, non-empty element tree, post_content is never written.
+* Internal-link inserts and deletes now also work in heading, icon-box, and image-box widgets, not just text-editor. Widgets that carry their own whole-widget link (settings.link.url) are skipped so we never nest an <a> inside an <a>.
+* Insert responses gain placed_in {element_id, widget_type, setting} so operators can see exactly where a link landed.
+* Every _elementor_data write for internal links now goes through one helper that both wp_slash()es the JSON and refuses to write when wp_json_encode() fails — previously an encoding failure would have written an empty string and wiped the page's entire Elementor design.
+* Better error messages: a sentence that is already linked now reports that specifically instead of "could not find that sentence".
 
 = 2.2.3 =
 * FIX: is_elementor_post() now returns false when the Elementor plugin isn't active. Previously a stale _elementor_edit_mode meta (left over from a past builder) routed internal-link inserts/deletes into a vestigial _elementor_data blob that never renders — a silent phantom insert (claritypest incident). Inserts on such pages now correctly take the post_content path.

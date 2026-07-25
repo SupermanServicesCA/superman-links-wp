@@ -2432,6 +2432,9 @@ class Superman_Links_API {
             'anchor_text' => $anchor_text,
             'is_elementor' => $is_elementor,
             'mode' => is_array($result) && isset($result['mode']) ? $result['mode'] : 'append',
+            // {element_id, widget_type, setting} when the link was placed inside
+            // an Elementor widget; null for post_content writes and appends.
+            'placed_in' => is_array($result) && isset($result['placed_in']) ? $result['placed_in'] : null,
         ]);
     }
 
@@ -2466,15 +2469,25 @@ class Superman_Links_API {
             $elementor_data = get_post_meta($source_post_id, '_elementor_data', true);
             if (!empty($elementor_data)) {
                 $data = is_string($elementor_data) ? json_decode($elementor_data, true) : $elementor_data;
-                if (is_array($data)) {
-                    if ($this->unwrap_in_elementor_text_editors($data, $target_url)) {
-                        // wp_slash() is load-bearing: update_post_meta() unslashes its input,
-                        // so raw wp_json_encode() output loses the \" escapes inside widget
-                        // HTML and corrupts _elementor_data (see v1.8.1 / v2.2.1).
-                        update_post_meta($source_post_id, '_elementor_data', wp_slash(wp_json_encode($data)));
-                        $this->regenerate_elementor_css($source_post_id);
-                        $unwrapped_anywhere = true;
+                if (!is_array($data)) {
+                    // Corrupted tree — we cannot safely unwrap, and silently
+                    // falling through to the post_content scan below would
+                    // report success for a link still rendering on the page.
+                    return new WP_Error(
+                        'elementor_data_corrupt',
+                        __("This page's Elementor data could not be parsed, so nothing was removed. Inspect the raw data via GET /elementor/:id (it returns data_raw_b64 when decoding fails) and repair the page before retrying.", 'superman-links'),
+                        ['status' => 422]
+                    );
+                }
+                if ($this->unwrap_in_elementor_widgets($data, $target_url)) {
+                    if (!$this->write_internal_links_elementor_data($source_post_id, $data)) {
+                        return new WP_Error(
+                            'elementor_write_failed',
+                            __('The page could not be re-encoded safely, so nothing was written. Check the site error log.', 'superman-links'),
+                            ['status' => 500]
+                        );
                     }
+                    $unwrapped_anywhere = true;
                 }
             }
         }
@@ -2512,34 +2525,33 @@ class Superman_Links_API {
     }
 
     /**
-     * Walk Elementor element tree, unwrapping the first matching anchor in
-     * any text-editor widget. Mutates $elements in place. Returns true on
-     * first successful unwrap.
+     * Walk the Elementor element tree, unwrapping the first matching anchor in
+     * any allowlisted widget setting (§internal_link_wrappable_fields — same
+     * allowlist as the insert walk, so anything we can place we can also
+     * remove). Mutates $elements in place. Returns true on first unwrap.
      */
-    private function unwrap_in_elementor_text_editors(&$elements, $target_url) {
+    private function unwrap_in_elementor_widgets(&$elements, $target_url) {
         if (!is_array($elements)) return false;
-        $unwrapped = false;
         foreach ($elements as &$el) {
             if (!is_array($el)) continue;
             if (!empty($el['elements'])) {
-                if ($this->unwrap_in_elementor_text_editors($el['elements'], $target_url)) {
-                    $unwrapped = true;
-                    // Continue scanning siblings for additional matches in
-                    // case the same anchor was inserted in multiple widgets,
-                    // but for v1 we stop at first hit.
+                // Stop at the first hit, matching the insert walk's semantics.
+                if ($this->unwrap_in_elementor_widgets($el['elements'], $target_url)) {
                     return true;
                 }
             }
-            if (isset($el['widgetType']) && $el['widgetType'] === 'text-editor') {
-                $editor_html = $el['settings']['editor'] ?? '';
-                $new_html = $this->unwrap_anchor_in_html($editor_html, $target_url);
+            if (!isset($el['widgetType'])) continue;
+            foreach ($this->internal_link_wrappable_fields($el['widgetType']) as $field) {
+                $html = $el['settings'][$field] ?? '';
+                if (!is_string($html) || $html === '') continue;
+                $new_html = $this->unwrap_anchor_in_html($html, $target_url);
                 if ($new_html !== null) {
-                    $el['settings']['editor'] = $new_html;
+                    $el['settings'][$field] = $new_html;
                     return true;
                 }
             }
         }
-        return $unwrapped;
+        return false;
     }
 
     /**
@@ -3151,33 +3163,73 @@ class Superman_Links_API {
     }
 
     /**
-     * Insert a link into an Elementor page's last text-editor widget
+     * Insert a link into an Elementor page.
+     *
+     * THE RULE (v2.3.0): on an Elementor page with a valid, non-empty element
+     * tree, post_content is NEVER written. Every path that cannot place the
+     * link inside _elementor_data returns a 422 that writes nothing, rather
+     * than a green success that never renders ("phantom insert").
+     *
+     * Pre-2.3.0 this method had three silent post_content fallbacks — a walk
+     * miss, an unparseable tree, and a failed append. All three produced links
+     * the CRM recorded as live and that no visitor could ever see (S211d).
      */
     private function insert_link_elementor($post_id, $target_url, $anchor_text, $match_context = null) {
         $elementor_data = get_post_meta($post_id, '_elementor_data', true);
 
+        // No Elementor tree at all. This is the ONE legitimate "post_content
+        // really renders on an Elementor site" case (classic content shown
+        // through a Theme Builder single template), so the standard path is
+        // correct here. Everything below this point has a real tree.
         if (empty($elementor_data)) {
             return $this->insert_link_standard($post_id, $target_url, $anchor_text, $match_context);
         }
 
         $data = is_string($elementor_data) ? json_decode($elementor_data, true) : $elementor_data;
         if (!is_array($data)) {
-            return $this->insert_link_standard($post_id, $target_url, $anchor_text, $match_context);
+            // Corrupted _elementor_data. The front-end keeps rendering from
+            // Elementor's element cache, so writing post_content here would be
+            // a guaranteed phantom (this is exactly the S211d corruption state).
+            return new WP_Error(
+                'elementor_data_corrupt',
+                __("This page's Elementor data could not be parsed, so no link was inserted. Inspect the raw data via GET /elementor/:id (it returns data_raw_b64 when decoding fails) and repair the page before retrying.", 'superman-links'),
+                ['status' => 422]
+            );
         }
 
         // Try in-place wrap first when caller provided sentence context
         if (!empty($match_context)) {
-            $wrapped = $this->wrap_in_elementor_text_editors($data, $match_context, $anchor_text, $target_url);
-            if ($wrapped) {
-                // wp_slash() is load-bearing — see delete path / v2.2.1 note.
-                update_post_meta($post_id, '_elementor_data', wp_slash(wp_json_encode($data)));
-                $this->regenerate_elementor_css($post_id);
-                return ['mode' => 'wrap'];
+            $visited_html = [];
+            $placed = $this->wrap_in_elementor_widgets($data, $match_context, $anchor_text, $target_url, $visited_html);
+            if ($placed !== null) {
+                if (!$this->write_internal_links_elementor_data($post_id, $data)) {
+                    return new WP_Error(
+                        'elementor_write_failed',
+                        __('The page could not be re-encoded safely, so nothing was written. Check the site error log.', 'superman-links'),
+                        ['status' => 500]
+                    );
+                }
+                return ['mode' => 'wrap', 'placed_in' => $placed];
             }
-            // Elementor text-editor widgets didn't contain the context —
-            // fall back to post_content (handles theme-post-content widgets,
-            // shortcode widgets, and other non-text-editor sources).
-            return $this->insert_link_standard($post_id, $target_url, $anchor_text, $match_context);
+
+            // Walk miss. Before the generic message, distinguish the most common
+            // real cause: the sentence is already linked, so wrap_anchor_in_html
+            // could never match it (it skips text inside <a>). Without this the
+            // operator is told to go hunting for an unsupported widget that
+            // doesn't exist.
+            if ($this->sentence_overlaps_existing_link(implode("\n", $visited_html), $match_context)) {
+                return new WP_Error(
+                    'anchor_already_linked',
+                    __('That sentence already contains a link on this page, so the anchor cannot be wrapped (the plugin never nests links). Nothing was changed — edit the page manually if you want to repoint the existing link.', 'superman-links'),
+                    ['status' => 422]
+                );
+            }
+
+            return new WP_Error(
+                'context_not_found_elementor',
+                __("The sentence was found on the page but lives in an Elementor widget the plugin can't edit yet. Nothing was changed — insert it manually in the Elementor editor.", 'superman-links'),
+                ['status' => 422]
+            );
         }
 
         // No context: legacy append-to-last-text-editor behavior
@@ -3190,40 +3242,119 @@ class Superman_Links_API {
         $modified = $this->append_to_last_text_editor($data, $link_html);
 
         if (!$modified) {
-            return $this->insert_link_standard($post_id, $target_url, $anchor_text, $match_context);
+            // This page has no text-editor widget to append to. The old code
+            // fell back to post_content here, which phantoms UNCONDITIONALLY —
+            // unlike the wrap path it needs no pre-existing copy of the text,
+            // because appending always "succeeds".
+            return new WP_Error(
+                'no_text_widget_for_append',
+                __('This Elementor page has no text widget to append a link to. Nothing was changed — provide sentence context to place the link in-line, or add the link manually.', 'superman-links'),
+                ['status' => 422]
+            );
         }
 
-        // wp_slash() is load-bearing — see wrap path above / v2.2.1 note.
-        update_post_meta($post_id, '_elementor_data', wp_slash(wp_json_encode($data)));
-        $this->regenerate_elementor_css($post_id);
+        if (!$this->write_internal_links_elementor_data($post_id, $data)) {
+            return new WP_Error(
+                'elementor_write_failed',
+                __('The page could not be re-encoded safely, so nothing was written. Check the site error log.', 'superman-links'),
+                ['status' => 500]
+            );
+        }
 
         return ['mode' => 'append'];
     }
 
     /**
-     * Walk Elementor element tree and try to wrap the anchor inside the
-     * first text-editor widget whose HTML contains the context. Mutates
-     * $elements in place. Returns true on first successful wrap.
+     * Text-bearing settings the internal-link walk is allowed to wrap/unwrap,
+     * per Elementor widget type. Allowlist ONLY — a generic all-string walk
+     * would hit __dynamic__ / __globals__ / CSS settings and corrupt the tree.
+     *
+     * Keys are copied from real _elementor_data dumps, never invented:
+     *   text-editor.editor            — pre-existing behavior
+     *   heading.title                 — 91 instances in fleet-sample; 30 of them
+     *                                   already carry inline HTML, so Elementor
+     *                                   demonstrably renders raw HTML here
+     *   icon-box/image-box.description_text — page-builder emitter
+     *
+     * TODO (needs a real dump before coding): the classic free toggle/accordion/
+     * tabs widgets keep their body copy in the repeater settings.tabs[] under
+     * 'tab_content'. That shape was observed live during S211d on
+     * bugmanpestcontrol.ca/spiders/ (post 423) but could not be re-dumped at
+     * implementation time — SiteGround's anti-bot walls the API from this IP.
+     * NB it is NOT the same shape as Elementor Pro's nested-accordion, which
+     * uses settings.items[] with 'item_title' and whose answers are child
+     * widgets the recursive walk already reaches. Until a dump confirms it,
+     * toggle content returns a clean 422 instead of a phantom.
      */
-    private function wrap_in_elementor_text_editors(&$elements, $context, $anchor_text, $target_url) {
-        if (!is_array($elements)) return false;
+    private function internal_link_wrappable_fields($widget_type) {
+        switch ($widget_type) {
+            case 'text-editor':
+                return ['editor'];
+            case 'heading':
+                return ['title'];
+            case 'icon-box':
+            case 'image-box':
+                return ['description_text'];
+            default:
+                return [];
+        }
+    }
+
+    /**
+     * Walk the Elementor element tree and try to wrap the anchor inside the
+     * first allowlisted widget setting whose HTML contains the context.
+     * Mutates $elements in place.
+     *
+     * Returns an array {element_id, widget_type, setting} on the first
+     * successful wrap, or NULL on a miss.
+     *
+     * Use `!== null` at every call site, never a truthiness check — an empty
+     * array is falsy in PHP, so a truthy test would read a future empty-array
+     * return as "found nothing" and silently reintroduce the phantom.
+     *
+     * $visited_html collects every setting the walk actually inspected, so the
+     * caller can tell "already linked" apart from "unsupported widget".
+     */
+    private function wrap_in_elementor_widgets(&$elements, $context, $anchor_text, $target_url, &$visited_html) {
+        if (!is_array($elements)) return null;
         foreach ($elements as &$el) {
             if (!is_array($el)) continue;
             if (!empty($el['elements'])) {
-                if ($this->wrap_in_elementor_text_editors($el['elements'], $context, $anchor_text, $target_url)) {
-                    return true;
+                $placed = $this->wrap_in_elementor_widgets($el['elements'], $context, $anchor_text, $target_url, $visited_html);
+                if ($placed !== null) {
+                    return $placed;
                 }
             }
-            if (isset($el['widgetType']) && $el['widgetType'] === 'text-editor') {
-                $editor_html = $el['settings']['editor'] ?? '';
-                $wrapped = $this->wrap_anchor_in_html($editor_html, $context, $anchor_text, $target_url);
+            if (!isset($el['widgetType'])) continue;
+
+            $fields = $this->internal_link_wrappable_fields($el['widgetType']);
+            if (empty($fields)) continue;
+
+            // Nested-anchor guard. Elementor wraps a widget's ENTIRE output in
+            // an <a> when settings.link.url is set (heading, icon-box, image-box
+            // all offer this). wrap_anchor_in_html only ever sees the setting's
+            // own text, so its "never nest inside <a>" guard cannot see a
+            // widget-level link — wrapping here would emit <a> inside <a>.
+            // Applied to every allowlisted widget, not just the three that have
+            // the control today, so a future allowlist row can't forget it.
+            if (!empty($el['settings']['link']['url'])) continue;
+
+            foreach ($fields as $field) {
+                $html = $el['settings'][$field] ?? '';
+                if (!is_string($html) || $html === '') continue;
+                $visited_html[] = $html;
+                $wrapped = $this->wrap_anchor_in_html($html, $context, $anchor_text, $target_url);
                 if ($wrapped !== null) {
-                    $el['settings']['editor'] = $wrapped;
-                    return true;
+                    $el['settings'][$field] = $wrapped;
+                    return [
+                        'element_id'  => $el['id'] ?? null,
+                        'widget_type' => $el['widgetType'],
+                        'setting'     => $field,
+                    ];
                 }
             }
         }
-        return false;
+        return null;
     }
 
     /**
@@ -3245,6 +3376,36 @@ class Superman_Links_API {
         }
 
         return false;
+    }
+
+    /**
+     * Single choke point for every internal-link write to _elementor_data.
+     * Returns true when the write happened, false when it was refused.
+     *
+     * wp_slash(): update_post_meta() unslashes its argument, so raw
+     * wp_json_encode() output loses the \" escapes inside widget HTML and
+     * corrupts _elementor_data. That bug shipped twice (v1.8.1, then again in
+     * the internal-link paths until v2.2.1) precisely because each write site
+     * hand-rolled this. There is now exactly one.
+     *
+     * The === false guard is equally load-bearing: wp_json_encode() returns
+     * false on invalid UTF-8 or depth overflow, and update_post_meta(..., false)
+     * writes an EMPTY STRING — which wipes the page's entire Elementor design.
+     * Never write unverified output; let the caller surface a 500 instead.
+     */
+    private function write_internal_links_elementor_data($post_id, $data) {
+        $json = wp_json_encode($data);
+        if ($json === false) {
+            error_log(sprintf(
+                'Superman Links: wp_json_encode failed for _elementor_data on post %d (%s) — write aborted, page left untouched',
+                $post_id,
+                function_exists('json_last_error_msg') ? json_last_error_msg() : 'unknown error'
+            ));
+            return false;
+        }
+        update_post_meta($post_id, '_elementor_data', wp_slash($json));
+        $this->regenerate_elementor_css($post_id);
+        return true;
     }
 
     /**
