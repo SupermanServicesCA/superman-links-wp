@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.0
 Tested up to: 6.7
-Stable tag: 2.3.2
+Stable tag: 2.3.3
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,9 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 2.3.3 =
+* FIX (follow-up to 2.3.2): 2.3.2's fix for the over-eager "already linked" message went too far the other way — it compared against the raw HTML source instead of the rendered text, so any sentence containing an apostrophe, an &amp;, or a non-breaking space stopped being recognised and fell back to the vaguer "can't edit that widget" message. Both the matcher and the diagnostic now share one text-extraction and matching routine, so they can no longer disagree. Diagnostic only — no change to what gets written.
 
 = 2.3.2 =
 * FIX (follow-up to 2.3.0): the "that sentence is already linked" error could fire on sentences that are not linked at all. The check looked at every text widget on the page, so any unrelated link whose anchor text happened to be a substring of the sentence (e.g. a "spider" link vs. the sentence "...spider control...") triggered it. It is now scoped to the widget that actually contains the sentence. Nothing was ever written incorrectly — this only affected which of two 422 messages you were shown.

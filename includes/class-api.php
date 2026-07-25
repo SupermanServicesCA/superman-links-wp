@@ -2767,15 +2767,10 @@ class Superman_Links_API {
         // line breaks / multiple spaces between words don't kill the match.
         // We track byte offsets back to the original $flat positions.
 
+        // Shared with html_text_contains() so the diagnostic can never disagree
+        // with the matcher about whether the sentence is present.
         $build_pattern = function ($needle) {
-            $needle_norm = $this->normalize_whitespace($needle);
-            if ($needle_norm === '') return null;
-            $tokens = preg_split('/\s+/u', $needle_norm);
-            $escaped = array_map(function ($t) {
-                $quoted = preg_quote($t, '/');
-                return $this->normalize_quotes_for_regex($quoted);
-            }, $tokens);
-            return '/' . implode('\s+', $escaped) . '/iu';
+            return $this->context_match_pattern($needle);
         };
 
         $context_norm = $this->normalize_whitespace($context);
@@ -3304,15 +3299,57 @@ class Superman_Links_API {
      * toggle content returns a clean 422 instead of a phantom.
      */
     /**
-     * Does this HTML fragment's plain text contain the context sentence?
-     * Whitespace-normalised and case-insensitive; tags become spaces so
-     * "<p>a</p><p>b</p>" reads as "a b", not "ab". Diagnostic use only.
+     * Build the whitespace-tolerant, typography-tolerant regex used to locate a
+     * phrase in a page's plain text. Shared by wrap_anchor_in_html() and
+     * html_text_contains() ON PURPOSE: when these two diverged, the diagnostic
+     * disagreed with the matcher about whether a sentence was present, and
+     * reported the wrong 422 on any copy containing an apostrophe or &amp;.
+     * Returns null for an empty needle.
+     */
+    private function context_match_pattern($needle) {
+        $needle_norm = $this->normalize_whitespace($needle);
+        if ($needle_norm === '') return null;
+        $tokens = preg_split('/\s+/u', $needle_norm);
+        $escaped = array_map(function ($t) {
+            return $this->normalize_quotes_for_regex(preg_quote($t, '/'));
+        }, $tokens);
+        return '/' . implode('\s+', $escaped) . '/iu';
+    }
+
+    /**
+     * Plain text of an HTML fragment, extracted exactly the way
+     * wrap_anchor_in_html() sees it — DOMDocument text nodes concatenated, so
+     * entities are decoded (&#8217; -> ', &amp; -> &). Deliberately does NOT
+     * insert spaces between block elements: the matcher doesn't either, and
+     * agreeing with the matcher matters more here than tidy prose.
+     */
+    private function html_to_plain_text($html) {
+        if (!is_string($html) || $html === '') return '';
+        $doc = new DOMDocument();
+        libxml_use_internal_errors(true);
+        $loaded = $doc->loadHTML(
+            '<?xml encoding="UTF-8"?><div id="superman-root">' . $html . '</div>',
+            LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD
+        );
+        libxml_clear_errors();
+        if (!$loaded) return '';
+        $root = $doc->getElementById('superman-root');
+        if (!$root) $root = $doc->documentElement;
+        return $root ? $root->textContent : '';
+    }
+
+    /**
+     * Does this HTML fragment contain the context sentence, including text that
+     * sits inside <a> tags? That inclusion is the point: the wrap fails with
+     * the context present precisely when part of the sentence is already
+     * linked, which is what distinguishes "already linked" from "unsupported
+     * widget". Diagnostic use only — never gates a write.
      */
     private function html_text_contains($html, $context) {
-        $needle = strtolower($this->normalize_whitespace($context));
-        if ($needle === '') return false;
-        $text = strtolower($this->normalize_whitespace(preg_replace('/<[^>]*>/', ' ', $html)));
-        return strpos($text, $needle) !== false;
+        $pattern = $this->context_match_pattern($context);
+        if ($pattern === null) return false;
+        $text = $this->html_to_plain_text($html);
+        return $text !== '' && preg_match($pattern, $text) === 1;
     }
 
     private function internal_link_wrappable_fields($widget_type) {
