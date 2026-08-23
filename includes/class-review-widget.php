@@ -75,7 +75,7 @@ class Superman_Links_Review_Widget {
             $out[] = [
                 'id'                 => isset($review['id']) ? sanitize_text_field($review['id']) : '',
                 'reviewer_name'      => isset($review['reviewer_name']) ? sanitize_text_field($review['reviewer_name']) : '',
-                'reviewer_photo_url' => isset($review['reviewer_photo_url']) ? esc_url_raw($review['reviewer_photo_url']) : '',
+                'reviewer_photo_url' => esc_url_raw($this->as_string($review['reviewer_photo_url'] ?? '')),
                 'star_rating'        => isset($review['star_rating']) ? intval($review['star_rating']) : 0,
                 'comment'            => isset($review['comment']) ? sanitize_textarea_field($review['comment']) : '',
                 'create_time'        => isset($review['create_time']) ? sanitize_text_field($review['create_time']) : '',
@@ -92,7 +92,7 @@ class Superman_Links_Review_Widget {
             'total_review_count' => isset($summary['total_review_count']) ? intval($summary['total_review_count']) : 0,
             'average_rating'     => isset($summary['average_rating']) ? floatval($summary['average_rating']) : 0.0,
             'rating_label'       => isset($summary['rating_label']) ? sanitize_text_field($summary['rating_label']) : '',
-            'google_review_url'  => isset($summary['google_review_url']) ? esc_url_raw($summary['google_review_url']) : '',
+            'google_review_url'  => esc_url_raw($this->as_string($summary['google_review_url'] ?? '')),
         ];
     }
 
@@ -109,8 +109,11 @@ class Superman_Links_Review_Widget {
         $out = [];
         foreach (['card_bg_color', 'star_color', 'text_color', 'header_bg_color', 'accent_color'] as $key) {
             if (isset($config[$key])) {
-                $hex = sanitize_hex_color($config[$key]);
-                if ($hex !== null) {
+                $hex = sanitize_hex_color($this->as_string($config[$key]));
+                // Core returns '' for '' and null for anything invalid. Store
+                // neither — an empty colour is not a colour, and hex_or() would
+                // skip it anyway.
+                if (!empty($hex)) {
                     $out[$key] = $hex;
                 }
             }
@@ -134,15 +137,33 @@ class Superman_Links_Review_Widget {
     }
 
     /**
+     * Coerce a JSON value to a string, or '' if it is not scalar.
+     *
+     * Several core sanitizers have NO type guard and raise a TypeError in PHP 8
+     * when handed an array: sanitize_hex_color() does preg_match() on it, and
+     * esc_url()/esc_url_raw() do ltrim() on it. Both are reachable from a JSON
+     * body ({"accent_color": ["#fff"]}) and from a legacy wp_options row written
+     * before v2.3.4, when the request body was stored unchanged. On the render
+     * path that TypeError is a white screen on the client's public page, so this
+     * runs in front of every such call.
+     *
+     * sanitize_text_field() and sanitize_textarea_field() do NOT need it — core's
+     * _sanitize_text_fields() returns '' for an object or an array.
+     */
+    private function as_string($value) {
+        return (is_string($value) || is_numeric($value)) ? (string) $value : '';
+    }
+
+    /**
      * First key in $keys holding a valid hex colour wins; $default otherwise.
      */
     private function hex_or($config, $keys, $default) {
         foreach ($keys as $key) {
-            if (empty($config[$key])) {
+            if (!isset($config[$key])) {
                 continue;
             }
-            $hex = sanitize_hex_color($config[$key]);
-            if ($hex !== null) {
+            $hex = sanitize_hex_color($this->as_string($config[$key]));
+            if (!empty($hex)) {
                 return $hex;
             }
         }
@@ -219,8 +240,10 @@ class Superman_Links_Review_Widget {
         // Summary
         $average_rating     = isset($summary['average_rating']) ? floatval($summary['average_rating']) : 5.0;
         $total_review_count = isset($summary['total_review_count']) ? intval($summary['total_review_count']) : count($reviews);
-        $rating_label       = isset($summary['rating_label']) ? $summary['rating_label'] : 'Excellent';
-        $google_review_url  = isset($summary['google_review_url']) ? $summary['google_review_url'] : '';
+        $rating_label       = $this->as_string($summary['rating_label'] ?? '') ?: 'Excellent';
+        // as_string(): a pre-v2.3.4 option row can hold a non-string here, and
+        // esc_url() would raise a TypeError on the public page.
+        $google_review_url  = $this->as_string($summary['google_review_url'] ?? '');
 
         // Unique instance ID so multiple shortcodes on one page don't clash
         static $instance = 0;
@@ -308,11 +331,18 @@ class Superman_Links_Review_Widget {
     }
 
     private function render_review_card($review, $index = 0) {
-        $name        = isset($review['reviewer_name']) ? $review['reviewer_name'] : 'Anonymous';
-        $photo_url   = isset($review['reviewer_photo_url']) ? $review['reviewer_photo_url'] : '';
-        $comment     = isset($review['comment']) ? (string)$review['comment'] : '';
-        $rating      = isset($review['star_rating']) ? intval($review['star_rating']) : 5;
-        $create_time = isset($review['create_time']) ? $review['create_time'] : '';
+        // as_string() on every read: this renders whatever is in wp_options, and
+        // a row written before v2.3.4 was never sanitized. A non-string here
+        // reaches esc_url() (ltrim), strtotime(), crc32() and preg_split(), none
+        // of which guard their argument — that is a TypeError on a public page.
+        if (!is_array($review)) {
+            return '';
+        }
+        $name        = $this->as_string($review['reviewer_name'] ?? '') ?: 'Anonymous';
+        $photo_url   = $this->as_string($review['reviewer_photo_url'] ?? '');
+        $comment     = $this->as_string($review['comment'] ?? '');
+        $rating      = intval($review['star_rating'] ?? 5);
+        $create_time = $this->as_string($review['create_time'] ?? '');
 
         $relative_time = $this->get_relative_time($create_time);
         $initials = $this->get_initials($name);
