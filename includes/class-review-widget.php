@@ -44,9 +44,9 @@ class Superman_Links_Review_Widget {
         $body = $request->get_json_params();
 
         $data = [
-            'reviews' => isset($body['reviews']) ? $body['reviews'] : [],
-            'summary' => isset($body['summary']) ? $body['summary'] : [],
-            'config'  => isset($body['config']) ? $body['config'] : [],
+            'reviews' => $this->sanitize_reviews(isset($body['reviews']) ? $body['reviews'] : []),
+            'summary' => $this->sanitize_summary(isset($body['summary']) ? $body['summary'] : []),
+            'config'  => $this->sanitize_config(isset($body['config']) ? $body['config'] : []),
             'updated_at' => current_time('mysql'),
         ];
 
@@ -57,6 +57,96 @@ class Superman_Links_Review_Widget {
             'message' => 'Reviews data stored successfully.',
             'review_count' => count($data['reviews']),
         ], 200);
+    }
+
+    /**
+     * Whitelist-sanitize the review rows. The key list mirrors the payload the
+     * CRM's review-widget-api edge function sends; an unknown key is dropped.
+     */
+    private function sanitize_reviews($reviews) {
+        if (!is_array($reviews)) {
+            return [];
+        }
+        $out = [];
+        foreach ($reviews as $review) {
+            if (!is_array($review)) {
+                continue;
+            }
+            $out[] = [
+                'id'                 => isset($review['id']) ? sanitize_text_field($review['id']) : '',
+                'reviewer_name'      => isset($review['reviewer_name']) ? sanitize_text_field($review['reviewer_name']) : '',
+                'reviewer_photo_url' => isset($review['reviewer_photo_url']) ? esc_url_raw($review['reviewer_photo_url']) : '',
+                'star_rating'        => isset($review['star_rating']) ? intval($review['star_rating']) : 0,
+                'comment'            => isset($review['comment']) ? sanitize_textarea_field($review['comment']) : '',
+                'create_time'        => isset($review['create_time']) ? sanitize_text_field($review['create_time']) : '',
+            ];
+        }
+        return $out;
+    }
+
+    private function sanitize_summary($summary) {
+        if (!is_array($summary)) {
+            return [];
+        }
+        return [
+            'total_review_count' => isset($summary['total_review_count']) ? intval($summary['total_review_count']) : 0,
+            'average_rating'     => isset($summary['average_rating']) ? floatval($summary['average_rating']) : 0.0,
+            'rating_label'       => isset($summary['rating_label']) ? sanitize_text_field($summary['rating_label']) : '',
+            'google_review_url'  => isset($summary['google_review_url']) ? esc_url_raw($summary['google_review_url']) : '',
+        ];
+    }
+
+    /**
+     * Colours are written into a <style> block, where esc_attr() does NOT help:
+     * it leaves '{', '}' and ';' intact, so an unvalidated value can inject CSS
+     * rules. sanitize_hex_color() returns null for anything that is not a hex
+     * colour, and render_shortcode() falls back to its default in that case.
+     */
+    private function sanitize_config($config) {
+        if (!is_array($config)) {
+            return [];
+        }
+        $out = [];
+        foreach (['card_bg_color', 'star_color', 'text_color', 'header_bg_color', 'accent_color'] as $key) {
+            if (isset($config[$key])) {
+                $hex = sanitize_hex_color($config[$key]);
+                if ($hex !== null) {
+                    $out[$key] = $hex;
+                }
+            }
+        }
+        if (isset($config['card_style']) && in_array($config['card_style'], ['border', 'shadow'], true)) {
+            $out['card_style'] = $config['card_style'];
+        }
+        if (isset($config['orientation']) && in_array($config['orientation'], ['horizontal', 'vertical'], true)) {
+            $out['orientation'] = $config['orientation'];
+        }
+        if (isset($config['autoplay'])) {
+            $out['autoplay'] = (bool) $config['autoplay'];
+        }
+        if (isset($config['show_avatars'])) {
+            $out['show_avatars'] = (bool) $config['show_avatars'];
+        }
+        if (isset($config['vertical_max_reviews'])) {
+            $out['vertical_max_reviews'] = intval($config['vertical_max_reviews']);
+        }
+        return $out;
+    }
+
+    /**
+     * First key in $keys holding a valid hex colour wins; $default otherwise.
+     */
+    private function hex_or($config, $keys, $default) {
+        foreach ($keys as $key) {
+            if (empty($config[$key])) {
+                continue;
+            }
+            $hex = sanitize_hex_color($config[$key]);
+            if ($hex !== null) {
+                return $hex;
+            }
+        }
+        return $default;
     }
 
     public function render_shortcode($atts) {
@@ -97,12 +187,13 @@ class Superman_Links_Review_Widget {
         $summary = isset($data['summary']) ? $data['summary'] : [];
         $config  = isset($data['config']) ? $data['config'] : [];
 
-        // v2 config keys with legacy fallback
-        $header_bg = !empty($config['header_bg_color']) ? $config['header_bg_color']
-                    : (!empty($config['card_bg_color']) ? $config['card_bg_color'] : '#1f2937');
-        $accent    = !empty($config['accent_color']) ? $config['accent_color']
-                    : (!empty($config['star_color']) ? $config['star_color'] : '#fbbc04');
-        $text_on_header = !empty($config['text_color']) ? $config['text_color'] : '#ffffff';
+        // v2 config keys with legacy fallback.
+        // Re-validate on READ as well as on write: a site that last received a
+        // push from a plugin before v2.3.4 still holds an unvalidated option row,
+        // and these three values go into a <style> block (see sanitize_config).
+        $header_bg = $this->hex_or($config, ['header_bg_color', 'card_bg_color'], '#1f2937');
+        $accent    = $this->hex_or($config, ['accent_color', 'star_color'], '#fbbc04');
+        $text_on_header = $this->hex_or($config, ['text_color'], '#ffffff');
 
         $card_style  = (isset($config['card_style']) && in_array($config['card_style'], ['border', 'shadow'], true))
                        ? $config['card_style'] : 'shadow';
@@ -149,12 +240,17 @@ class Superman_Links_Review_Widget {
         );
 
         ob_start();
+        // NOTE on the echoes below: $inline_css is built from hex colours that
+        // hex_or() has already validated, and render_stars() / get_google_g_svg()
+        // / get_google_wordmark_inline() / render_review_card() return markup this
+        // class builds and escapes internally. They are not wrapped in wp_kses_post()
+        // because it strips <svg>. Do not echo an unvalidated value here.
         ?>
         <style><?php echo $inline_css; ?></style>
         <div id="<?php echo esc_attr($wid); ?>"
              class="superman-reviews-widget"
-             data-orientation="<?php echo $orientation_attr; ?>"
-             data-card-style="<?php echo $card_style_attr; ?>"
+             data-orientation="<?php echo esc_attr($orientation); ?>"
+             data-card-style="<?php echo esc_attr($card_style); ?>"
              data-autoplay="<?php echo ($autoplay && $orientation === 'horizontal') ? '1' : '0'; ?>"
              data-show-avatars="<?php echo $show_avatars ? '1' : '0'; ?>">
 
@@ -223,7 +319,10 @@ class Superman_Links_Review_Widget {
         $avatar_bg = $this->get_avatar_color($name);
 
         $is_long = mb_strlen($comment) > 160;
-        $short = $is_long ? rtrim(mb_substr($comment, 0, 160)) . '&hellip;' : '';
+        // Append the ellipsis AFTER escaping. Building it into $short meant
+        // esc_html() turned '&hellip;' into '&amp;hellip;', so the card showed
+        // the literal text "&hellip;" instead of an ellipsis.
+        $short = $is_long ? rtrim(mb_substr($comment, 0, 160)) : '';
 
         ob_start();
         ?>
@@ -251,7 +350,7 @@ class Superman_Links_Review_Widget {
 
             <p class="srw-card-comment">
                 <?php if ($is_long) : ?>
-                    <span class="srw-comment-short"><?php echo esc_html($short); ?></span>
+                    <span class="srw-comment-short"><?php echo esc_html($short); ?>&hellip;</span>
                     <span class="srw-comment-full" hidden><?php echo esc_html($comment); ?></span>
                     <button class="srw-read-more" type="button" data-more="More" data-less="Less">More</button>
                 <?php else : ?>

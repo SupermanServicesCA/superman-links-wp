@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.0
 Tested up to: 6.7
-Stable tag: 2.3.3
+Stable tag: 2.3.4
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,14 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 2.3.4 =
+* SECURITY: the review widget's colour values are now validated as hex colours before they reach the inline <style> block. They were escaped with esc_attr(), which does not escape '{', '}' or ';' in a CSS context, so a malformed colour could inject CSS rules. Validated on write AND on read, because a site that last received a push from an older plugin still holds an unvalidated value.
+* SECURITY: POST /reviews now whitelist-sanitizes every field it stores. It previously wrote the request body to the options table unchanged.
+* SECURITY: the Regenerate button draws the new API key from crypto.getRandomValues() instead of Math.random(). Math.random() is not a cryptographic source, so the old key was predictable. Same length and character set.
+* SECURITY: the API key comparison in the main REST class now uses hash_equals(), matching the review-widget and theme-colors classes.
+* FIX: a truncated review comment showed the literal text "&hellip;" instead of an ellipsis. The entity was built into the string before esc_html() ran over it.
+* Housekeeping: escape-at-output on two widget data attributes, esc_js() on the regenerate confirmation text, and a missing text domain. No behaviour change.
 
 = 2.3.3 =
 * FIX (follow-up to 2.3.2): 2.3.2's fix for the over-eager "already linked" message went too far the other way — it compared against the raw HTML source instead of the rendered text, so any sentence containing an apostrophe, an &amp;, or a non-breaking space stopped being recognised and fell back to the vaguer "can't edit that widget" message. Both the matcher and the diagnostic now share one text-extraction and matching routine, so they can no longer disagree. Diagnostic only — no change to what gets written.

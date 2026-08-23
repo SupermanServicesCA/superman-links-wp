@@ -43,7 +43,10 @@ class Superman_Links_Updater {
         if (!current_user_can('update_plugins')) {
             return;
         }
-        if (empty($_GET['superman_force_check'])) {
+        // Presence test only — the value is never read. Kept as a bare GET on
+        // purpose: ?superman_force_check=1 on any admin URL is the documented
+        // support step, and requiring a nonce would break that URL.
+        if (empty($_GET['superman_force_check'])) { // phpcs:ignore WordPress.Security.NonceVerification.Recycled
             return;
         }
         delete_transient($this->cache_key);

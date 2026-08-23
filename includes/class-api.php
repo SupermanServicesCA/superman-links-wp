@@ -30,7 +30,7 @@ class Superman_Links_API {
         // WP-Cron doesn't have a "every minute" schedule by default
         add_filter('cron_schedules', function ($schedules) {
             if (!isset($schedules['minute'])) {
-                $schedules['minute'] = ['interval' => 60, 'display' => __('Every Minute')];
+                $schedules['minute'] = ['interval' => 60, 'display' => __('Every Minute', 'superman-links')];
             }
             return $schedules;
         });
@@ -49,7 +49,7 @@ class Superman_Links_API {
         // external request can't toggle the cache bypass by spoofing the header alone
         // (our loopback fetch always sends both). Worst case if abused is a per-request
         // cache miss, not poisoning — but gating on the param closes even that.
-        if (!empty($_SERVER['HTTP_X_SUPERMAN_INTERNAL']) && isset($_GET['superman_nocache'])) {
+        if (!empty($_SERVER['HTTP_X_SUPERMAN_INTERNAL']) && isset($_GET['superman_nocache'])) { // phpcs:ignore WordPress.Security.NonceVerification.Recycled -- presence test only; no value is read or written.
             if (!defined('DONOTCACHEPAGE'))   { define('DONOTCACHEPAGE', true); }
             if (!defined('DONOTCACHEOBJECT')) { define('DONOTCACHEOBJECT', true); }
             if (!defined('DONOTCACHEDB'))     { define('DONOTCACHEDB', true); }
@@ -64,11 +64,16 @@ class Superman_Links_API {
      */
     public function handle_preflight() {
         // Only handle OPTIONS requests to our API namespace
-        if ($_SERVER['REQUEST_METHOD'] !== 'OPTIONS') {
+        $method = isset($_SERVER['REQUEST_METHOD'])
+            ? sanitize_text_field(wp_unslash($_SERVER['REQUEST_METHOD']))
+            : '';
+        if ($method !== 'OPTIONS') {
             return;
         }
 
-        $request_uri = $_SERVER['REQUEST_URI'] ?? '';
+        $request_uri = isset($_SERVER['REQUEST_URI'])
+            ? sanitize_text_field(wp_unslash($_SERVER['REQUEST_URI']))
+            : '';
         if (strpos($request_uri, '/wp-json/superman-links/') === false) {
             return;
         }
@@ -546,7 +551,9 @@ class Superman_Links_API {
             );
         }
 
-        if (empty($provided_key) || $provided_key !== $stored_key) {
+        // hash_equals() is timing-safe, and matches Superman_Links_Review_Widget
+        // and Superman_Links_Theme_Colors, which already compared this way.
+        if (empty($provided_key) || !hash_equals($stored_key, $provided_key)) {
             return new WP_Error(
                 'invalid_api_key',
                 __('Invalid or missing API key.', 'superman-links'),

@@ -72,15 +72,26 @@ class Superman_Links_Settings {
                readonly
         />
         <button type="button" class="button" onclick="regenerateApiKey()">
-            <?php _e('Regenerate', 'superman-links'); ?>
+            <?php esc_html_e('Regenerate', 'superman-links'); ?>
         </button>
         <script>
         function regenerateApiKey() {
-            if (confirm('<?php _e('Are you sure you want to regenerate the API key? The old key will stop working.', 'superman-links'); ?>')) {
+            if (confirm('<?php echo esc_js(__('Are you sure you want to regenerate the API key? The old key will stop working.', 'superman-links')); ?>')) {
                 const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
                 let key = '';
-                for (let i = 0; i < 32; i++) {
-                    key += chars.charAt(Math.floor(Math.random() * chars.length));
+                // crypto.getRandomValues is a CSPRNG. Math.random() is not, and an
+                // API key drawn from it is predictable. Same charset and length,
+                // so the key format does not change.
+                const buf = new Uint8Array(32);
+                if (window.crypto && window.crypto.getRandomValues) {
+                    window.crypto.getRandomValues(buf);
+                    for (let i = 0; i < 32; i++) {
+                        key += chars.charAt(buf[i] % chars.length);
+                    }
+                } else {
+                    for (let i = 0; i < 32; i++) {
+                        key += chars.charAt(Math.floor(Math.random() * chars.length));
+                    }
                 }
                 document.getElementById('superman_links_api_key').value = key;
                 document.getElementById('superman_links_api_key').removeAttribute('readonly');
