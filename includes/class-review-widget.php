@@ -99,8 +99,8 @@ class Superman_Links_Review_Widget {
     /**
      * Colours are written into a <style> block, where esc_attr() does NOT help:
      * it leaves '{', '}' and ';' intact, so an unvalidated value can inject CSS
-     * rules. safe_css_color() allows hex, var(--token) and rgb()/rgba() only,
-     * and render_shortcode() falls back to its default for anything else.
+     * rules. safe_css_color() gates the value on inertness first and a colour
+     * shape second, and render_shortcode() falls back to its default otherwise.
      */
     private function sanitize_config($config) {
         if (!is_array($config)) {
@@ -154,13 +154,18 @@ class Superman_Links_Review_Widget {
     /**
      * Validate a colour for use inside the inline <style> block.
      *
-     * Accepts three shapes, none of which can carry '{', '}' or ';' and so none
-     * of which can inject a CSS rule:
-     *   - a hex colour            #abc / #aabbcc
-     *   - a custom-property ref   var(--token)  /  var(--token, #aabbcc)
-     *   - rgb()/rgba()            numeric arguments only
+     * Two safety gates, then a broad shape check:
+     *   1. reject any of  ; { } < > @ \ " ' * !  so the value cannot end the
+     *      declaration or open a rule, comment or at-rule;
+     *   2. reject url()/image()/element()/expression() so it cannot make the
+     *      visitor's browser fetch a third-party resource;
+     *   3. require a recognised colour shape - hex (3/4/6/8), var(--token),
+     *      rgb/rgba/hsl/hsla/lab/lch/oklab/oklch/color(), or a bare keyword.
      *
-     * var() is NOT optional to support. The plugin's own /theme-colors endpoint
+     * The shape list is deliberately BROAD. Twice in one day a narrower list
+     * silently reset a client's real brand colour to the built-in default, which
+     * is a visible regression on their page; the gates above are what make the
+     * value safe, not the shape list. var() is NOT optional to support. The plugin's own /theme-colors endpoint
      * returns the raw value when it is not hex (class-theme-colors.php:99,
      * `sanitize_hex_color($c) ?: $c`), and the CRM seeds the widget from it — a
      * real client config holds `var(--nv-primary-accent)`. A hex-only validator
@@ -173,18 +178,37 @@ class Superman_Links_Review_Widget {
      */
     private function safe_css_color($value) {
         $value = trim($this->as_string($value));
-        if ($value === '') {
+        if ($value === '' || strlen($value) > 128) {
             return null;
         }
-        $hex = sanitize_hex_color($value);
-        if (!empty($hex)) {
-            return $hex;
+
+        // Gate 1 - inertness. None of these can appear, so the value cannot end
+        // the declaration, open or close a rule, start a comment or an at-rule.
+        // Everything that survives is inert inside `--srw-x: VALUE;`.
+        if (preg_match('/[;{}<>@\\\\"\'*!]/', $value)) {
+            return null;
         }
-        if (preg_match('/^var\(\s*--[A-Za-z0-9_-]{1,64}\s*(?:,\s*#[A-Fa-f0-9]{3,8}\s*)?\)$/', $value)) {
-            return $value;
+        // Gate 2 - no fetching functions. These cannot inject a rule, but the
+        // stylesheet uses these variables in `background`, so a url() would make
+        // the visitor's browser hit a third-party server.
+        if (preg_match('/(?:url|image|image-set|element|expression)\s*\(/i', $value)) {
+            return null;
         }
-        if (preg_match('/^rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*(?:,\s*(?:0|1|0?\.\d{1,3})\s*)?\)$/', $value)) {
-            return $value;
+
+        // Gate 3 - a recognised colour shape. Kept deliberately broad: twice now
+        // a narrow allowlist has silently reset a client's real brand colour to
+        // the built-in default, which is a visible regression on their page.
+        // theme.json palettes legitimately hold every form below.
+        $shapes = array(
+            '/^#(?:[A-Fa-f0-9]{3,4}|[A-Fa-f0-9]{6}|[A-Fa-f0-9]{8})$/',   // #rgb #rgba #rrggbb #rrggbbaa
+            '/^var\(\s*--[A-Za-z0-9_-]{1,64}\s*(?:,[^()]{1,48})?\)$/', // var(--token[, fallback])
+            '/^(?:rgba?|hsla?|lab|lch|oklab|oklch|color)\([^()]{1,80}\)$/i',  // functional notations
+            '/^[A-Za-z]{3,30}$/',                                        // named colours, transparent, currentColor
+        );
+        foreach ($shapes as $shape) {
+            if (preg_match($shape, $value)) {
+                return $value;
+            }
         }
         return null;
     }
@@ -213,7 +237,11 @@ class Superman_Links_Review_Widget {
 
         $data = get_option($this->option_key, null);
 
-        if (empty($data) || empty($data['reviews'])) {
+        // is_array() on BOTH, not just empty(). empty() passes for a non-empty
+        // string, and $reviews then reaches count() and array_slice(), which are
+        // a TypeError in PHP 8 -- a white screen on the client's public page.
+        // Found by fuzzing the stored row, 2026-08-24.
+        if (!is_array($data) || empty($data['reviews']) || !is_array($data['reviews'])) {
             return '';
         }
 
@@ -480,12 +508,22 @@ class Superman_Links_Review_Widget {
         return $y . ($y === 1 ? ' year ago' : ' years ago');
     }
 
+    /**
+     * WordPress polyfills mb_substr() and mb_strlen() in wp-includes/compat.php,
+     * but NOT mb_strtoupper() -- checked against core 2026-08-24. A host without
+     * the mbstring extension would fatal here, and get_initials() runs for every
+     * review card, so that is a white screen on the public page.
+     */
+    private function upper($text) {
+        return function_exists('mb_strtoupper') ? mb_strtoupper($text) : strtoupper($text);
+    }
+
     private function get_initials($name) {
         $name = trim($name);
         if (empty($name)) return '?';
         $parts = preg_split('/\s+/', $name);
-        if (count($parts) === 1) return mb_strtoupper(mb_substr($parts[0], 0, 2));
-        return mb_strtoupper(mb_substr($parts[0], 0, 1) . mb_substr(end($parts), 0, 1));
+        if (count($parts) === 1) return $this->upper(mb_substr($parts[0], 0, 2));
+        return $this->upper(mb_substr($parts[0], 0, 1) . mb_substr(end($parts), 0, 1));
     }
 
     private function get_avatar_color($name) {

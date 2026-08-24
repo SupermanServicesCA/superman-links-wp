@@ -1,9 +1,9 @@
 === Superman Links ===
 Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
-Requires at least: 5.0
+Requires at least: 5.3
 Tested up to: 6.7
-Stable tag: 2.3.6
+Stable tag: 2.3.7
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,12 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 2.3.7 =
+* FIX: the review widget could fatal a page (white screen) if its stored data was not in the expected shape. `empty()` passes for a non-empty string, so a `reviews` value that was not an array reached count() and array_slice(), both a TypeError in PHP 8. Found by fuzzing the stored row rather than by reading the code.
+* FIX: the widget called mb_strtoupper() directly. WordPress polyfills mb_substr() and mb_strlen() for hosts without the mbstring extension, but it does NOT polyfill mb_strtoupper() — so on such a host every review card fataled the page. It now falls back to strtoupper().
+* FIX (follow-up to 2.3.6): colour validation still rejected several forms a WordPress theme legitimately supplies — hsl()/hsla(), 8-digit hex (#RRGGBBAA), modern space-separated rgb(), oklch()/lab()/color(), and plain keywords such as `transparent` and `currentColor`. Those were silently replaced by the plugin's built-in defaults. Validation is now safe by construction: a value is rejected if it contains any character that could end the declaration or open a rule, comment or at-rule, or if it calls url()/image()/element()/expression(); otherwise any recognised colour form is passed through untouched.
+* Requires at least is now 5.3, not 5.0. The widget calls wp_unique_id(), which WordPress only added in 5.0.3, so the old floor was wrong.
 
 = 2.3.6 =
 * FIX (follow-up to 2.3.4): the review widget's colour validation only accepted hex, so a client whose brand colours came from their theme (e.g. var(--nv-primary-accent)) had them silently replaced by the plugin's built-in defaults. That is a real styling regression: the plugin's own /theme-colors endpoint deliberately returns non-hex values unchanged, and the CRM seeds the widget from it. Hex, var(--token) with an optional hex fallback, and rgb()/rgba() are now all accepted. Anything else still falls back to the default, and none of the accepted forms can carry the '{', '}' or ';' characters a CSS injection needs.
