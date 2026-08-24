@@ -99,8 +99,8 @@ class Superman_Links_Review_Widget {
     /**
      * Colours are written into a <style> block, where esc_attr() does NOT help:
      * it leaves '{', '}' and ';' intact, so an unvalidated value can inject CSS
-     * rules. sanitize_hex_color() returns null for anything that is not a hex
-     * colour, and render_shortcode() falls back to its default in that case.
+     * rules. safe_css_color() allows hex, var(--token) and rgb()/rgba() only,
+     * and render_shortcode() falls back to its default for anything else.
      */
     private function sanitize_config($config) {
         if (!is_array($config)) {
@@ -109,12 +109,9 @@ class Superman_Links_Review_Widget {
         $out = [];
         foreach (['card_bg_color', 'star_color', 'text_color', 'header_bg_color', 'accent_color'] as $key) {
             if (isset($config[$key])) {
-                $hex = sanitize_hex_color($this->as_string($config[$key]));
-                // Core returns '' for '' and null for anything invalid. Store
-                // neither — an empty colour is not a colour, and hex_or() would
-                // skip it anyway.
-                if (!empty($hex)) {
-                    $out[$key] = $hex;
+                $colour = $this->safe_css_color($config[$key]);
+                if ($colour !== null) {
+                    $out[$key] = $colour;
                 }
             }
         }
@@ -155,16 +152,54 @@ class Superman_Links_Review_Widget {
     }
 
     /**
-     * First key in $keys holding a valid hex colour wins; $default otherwise.
+     * Validate a colour for use inside the inline <style> block.
+     *
+     * Accepts three shapes, none of which can carry '{', '}' or ';' and so none
+     * of which can inject a CSS rule:
+     *   - a hex colour            #abc / #aabbcc
+     *   - a custom-property ref   var(--token)  /  var(--token, #aabbcc)
+     *   - rgb()/rgba()            numeric arguments only
+     *
+     * var() is NOT optional to support. The plugin's own /theme-colors endpoint
+     * returns the raw value when it is not hex (class-theme-colors.php:99,
+     * `sanitize_hex_color($c) ?: $c`), and the CRM seeds the widget from it — a
+     * real client config holds `var(--nv-primary-accent)`. A hex-only validator
+     * silently resets those to the built-in defaults, which is a visible styling
+     * regression on the client's page. Verified against Superman Services on
+     * 2026-08-23, whose brand colours arrive from theme.json in exactly that form.
+     *
+     * Returns null when the value is not one of the three, and the caller falls
+     * back to its default.
+     */
+    private function safe_css_color($value) {
+        $value = trim($this->as_string($value));
+        if ($value === '') {
+            return null;
+        }
+        $hex = sanitize_hex_color($value);
+        if (!empty($hex)) {
+            return $hex;
+        }
+        if (preg_match('/^var\(\s*--[A-Za-z0-9_-]{1,64}\s*(?:,\s*#[A-Fa-f0-9]{3,8}\s*)?\)$/', $value)) {
+            return $value;
+        }
+        if (preg_match('/^rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*(?:,\s*(?:0|1|0?\.\d{1,3})\s*)?\)$/', $value)) {
+            return $value;
+        }
+        return null;
+    }
+
+    /**
+     * First key in $keys holding a valid colour wins; $default otherwise.
      */
     private function hex_or($config, $keys, $default) {
         foreach ($keys as $key) {
             if (!isset($config[$key])) {
                 continue;
             }
-            $hex = sanitize_hex_color($this->as_string($config[$key]));
-            if (!empty($hex)) {
-                return $hex;
+            $colour = $this->safe_css_color($config[$key]);
+            if ($colour !== null) {
+                return $colour;
             }
         }
         return $default;

@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.0
 Tested up to: 6.7
-Stable tag: 2.3.5
+Stable tag: 2.3.6
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,9 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 2.3.6 =
+* FIX (follow-up to 2.3.4): the review widget's colour validation only accepted hex, so a client whose brand colours came from their theme (e.g. var(--nv-primary-accent)) had them silently replaced by the plugin's built-in defaults. That is a real styling regression: the plugin's own /theme-colors endpoint deliberately returns non-hex values unchanged, and the CRM seeds the widget from it. Hex, var(--token) with an optional hex fallback, and rgb()/rgba() are now all accepted. Anything else still falls back to the default, and none of the accepted forms can carry the '{', '}' or ';' characters a CSS injection needs.
 
 = 2.3.5 =
 * FIX (follow-up to 2.3.4): 2.3.4's colour validation could itself raise a fatal error. WordPress's sanitize_hex_color() and esc_url() have no type guard and throw a TypeError in PHP 8 when handed an array rather than a string. The stored reviews row can contain any JSON type if it was last written by a plugin before 2.3.4, when the request body was saved unchanged — so on such a site the review widget could white-screen the page instead of rendering. Every value is now coerced to a string before it reaches those functions, on both the write and the render path. No site was observed in this state; the CRM only ever pushes strings.
