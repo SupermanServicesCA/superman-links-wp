@@ -271,6 +271,12 @@ class Superman_Links_API {
             'callback'            => [$this, 'rest_linkfinder_tick'],
             'permission_callback' => [$this, 'check_admin_or_api_key'],
         ]);
+        // Targeted re-sync: push a named list of posts, not the whole site.
+        register_rest_route($this->namespace, '/linkfinder/push', [
+            'methods'             => 'POST',
+            'callback'            => [$this, 'rest_linkfinder_push'],
+            'permission_callback' => [$this, 'check_admin_or_api_key'],
+        ]);
 
         // ==========================================
         // Internal Links Endpoints
@@ -2294,6 +2300,77 @@ class Superman_Links_API {
         // moving even if WP-Cron is unreliable.
         $this->linkfinder_bulk_push_tick();
         return rest_ensure_response($this->linkfinder_bulk_push_status());
+    }
+
+    /**
+     * Cap on /linkfinder/push. Each push can run a loopback full-page fetch
+     * (~6s); the bulk tick already found 30 at a time trips PHP
+     * max_execution_time on shared hosting and dropped to 10. This is half of
+     * that. Callers chunk.
+     */
+    const LINKFINDER_PUSH_MAX = 5;
+
+    /**
+     * Push a NAMED LIST of posts to the webhook, synchronously (v2.3.8).
+     *
+     * /linkfinder/start queues every published post and page on the site — on a
+     * 677-page site that is minutes of ticking to refresh the handful of donor
+     * pages a reviewer actually cares about. This route re-pushes only the posts
+     * asked for, and answers when they are done, so the caller needs no queue,
+     * no session and no polling.
+     *
+     * It calls the same linkfinder_push_post() the bulk tick and the save_post
+     * hook call, so the resulting wp_page_content row is byte-identical to one
+     * from a full re-sync. There is no second extraction path to keep in step.
+     *
+     * Capped at LINKFINDER_PUSH_MAX per request; callers chunk.
+     *
+     * `skip_fetch` omits the loopback fetch. LinkFinder's own content —
+     * headings, paragraphs, full_text, links — comes from render_post_to_html()
+     * and does NOT depend on it, so a caller that only needs fresh anchor text
+     * can set this and go roughly 6s/post faster. It leaves the on-page and
+     * schema signals at their previous values, so it defaults to false.
+     */
+    public function rest_linkfinder_push($request) {
+        $raw = $request->get_param('post_ids');
+        if (!is_array($raw) || empty($raw)) {
+            return new WP_Error(
+                'invalid_post_ids',
+                'post_ids must be a non-empty array of post IDs.',
+                ['status' => 400]
+            );
+        }
+
+        $ids = array_values(array_unique(array_filter(array_map('intval', $raw))));
+        if (count($ids) > self::LINKFINDER_PUSH_MAX) {
+            return new WP_Error(
+                'too_many_posts',
+                'At most ' . self::LINKFINDER_PUSH_MAX . ' post IDs per request. Send them in chunks.',
+                ['status' => 400]
+            );
+        }
+
+        $skip_fetch = filter_var($request->get_param('skip_fetch'), FILTER_VALIDATE_BOOLEAN);
+
+        $pushed  = [];
+        $skipped = [];
+        foreach ($ids as $id) {
+            // Returns false for a missing post, a non-publish status, a type
+            // that is not post/page, an unconfigured webhook, or a non-2xx
+            // response from the webhook. The caller is told which ids those
+            // were rather than being left to assume every id succeeded.
+            if ($this->linkfinder_push_post($id, null, $skip_fetch)) {
+                $pushed[] = $id;
+            } else {
+                $skipped[] = $id;
+            }
+        }
+
+        return rest_ensure_response([
+            'requested' => count($ids),
+            'pushed'    => $pushed,
+            'skipped'   => $skipped,
+        ]);
     }
 
     // ==========================================
