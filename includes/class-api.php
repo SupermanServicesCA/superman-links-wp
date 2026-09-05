@@ -2600,7 +2600,7 @@ class Superman_Links_API {
             if ($unwrapped_html !== null) {
                 $result = wp_update_post([
                     'ID' => $source_post_id,
-                    'post_content' => $unwrapped_html,
+                    'post_content' => wp_slash($unwrapped_html), // wp_update_post unslashes; see insert_link_standard()
                 ], true);
                 if (is_wp_error($result)) {
                     return $result;
@@ -3214,9 +3214,19 @@ class Superman_Links_API {
         if (!empty($match_context)) {
             $wrapped = $this->wrap_anchor_in_html($post->post_content, $match_context, $anchor_text, $target_url);
             if ($wrapped !== null) {
+                // wp_slash() is load-bearing on EVERY post_content write (v2.3.9).
+                // wp_update_post() unslashes its input. A Gutenberg block comment
+                // stores its attributes as JSON with backslash escapes
+                // (\u003c \u003e \u0022 \u0026 \u002d\u002d, and \n inside
+                // multi-line values such as customCSS). An unslashed
+                // write strips every backslash: the page then shows
+                // "u003cstrongu003e" as text and dynamic blocks (Rank Math FAQ)
+                // render the broken value. 30 fleet pages were damaged this way
+                // (2026-04 to 2026-09). See docs/plans/2026-09-03-plugin-dynamic-block-inserts.md
+                // and tests/test-post-content-slash.php.
                 $result = wp_update_post([
                     'ID' => $post_id,
-                    'post_content' => $wrapped,
+                    'post_content' => wp_slash($wrapped),
                 ], true);
                 if (is_wp_error($result)) {
                     return $result;
@@ -3248,7 +3258,7 @@ class Superman_Links_API {
 
         $result = wp_update_post([
             'ID' => $post_id,
-            'post_content' => $post->post_content . $link_html,
+            'post_content' => wp_slash($post->post_content . $link_html), // see the wp_slash note above
         ], true);
 
         if (is_wp_error($result)) {
