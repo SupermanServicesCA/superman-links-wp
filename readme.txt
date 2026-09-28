@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.3
 Tested up to: 6.7
-Stable tag: 2.3.10
+Stable tag: 2.3.11
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,9 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 2.3.11 =
+* `/elementor/capabilities` now returns `site_kit.globals` and `site_kit.typography_globals`. Each row carries the Elementor global's id, title, colour (or font family and weight), and whether the kit holds it as a system or a custom row. The existing `site_kit.colors` and `site_kit.fonts` keys are unchanged. The CRM needs the ids so a human can bind a page-builder role to one global, instead of the CRM guessing the role from the global's title.
 
 = 2.3.10 =
 * SECURITY: the post webhook wrote its whole payload to the PHP error log on every post save or delete, including the site's `api_key`. Anyone with hosting or file access to the site could read the key from `php_errorlog`. The key is now removed from the logged copy; the request to the CRM is unchanged. Found on topdawg.ca on 2026-09-28. Keys already written to existing logs stay there until the log is cleared or rotated.

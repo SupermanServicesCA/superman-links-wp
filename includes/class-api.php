@@ -420,6 +420,9 @@ class Superman_Links_API {
      * - pro_active / pro_version / free_version
      * - available_widgets (registered widget type names)
      * - site_kit { fonts, colors } extracted from the active Elementor kit
+     * - site_kit { globals, typography_globals } the same kit rows with their
+     *   ids kept, in kit order. `colors` buckets rows by title substring, which
+     *   cannot express intent, so the CRM binds a role to an id once instead.
      */
     public function get_elementor_capabilities($request) {
         if (!defined('ELEMENTOR_VERSION')) {
@@ -448,6 +451,8 @@ class Superman_Links_API {
         $site_kit = [
             'fonts'  => [],
             'colors' => (object) [],
+            'globals' => [],
+            'typography_globals' => [],
         ];
 
         $kit_id = (int) get_option('elementor_active_kit');
@@ -519,6 +524,68 @@ class Superman_Links_API {
                     }
                 }
                 $site_kit['fonts'] = array_values($fonts);
+
+                // Raw kit rows, ids kept, kit order preserved. No dedupe, no
+                // bucketing, no truncation: the CRM stores a human binding of
+                // role -> id, so it needs every row exactly as the kit holds it.
+                // The kit repeater keys a row as `_id` — verified in Elementor
+                // 4.3.2, core/kits/documents/tabs/global-colors.php, which
+                // declares `'_id' => 'primary'` and renders
+                // `--e-global-color-{{_id.VALUE}}`. global-typography.php uses
+                // `_id` too. The Elementor REST route renames it to `id`, so
+                // accept both; `_id` is the branch that fires on this meta.
+                $read_global_id = function ($entry) {
+                    $id = isset($entry['_id']) ? $entry['_id'] : (isset($entry['id']) ? $entry['id'] : null);
+                    if (!is_string($id) && !is_int($id)) return null;
+                    $id = (string) $id;
+                    return $id === '' ? null : $id;
+                };
+
+                $globals = [];
+                $collect_globals = function ($list, $source) use (&$globals, $read_global_id) {
+                    if (!is_array($list)) return;
+                    foreach ($list as $entry) {
+                        if (!is_array($entry)) continue;
+                        $id = $read_global_id($entry);
+                        if ($id === null) continue;
+                        $globals[] = [
+                            'id'     => $id,
+                            'title'  => isset($entry['title']) ? (string) $entry['title'] : '',
+                            'color'  => isset($entry['color']) ? (string) $entry['color'] : '',
+                            'source' => $source,
+                        ];
+                    }
+                };
+                $collect_globals($page_settings['system_colors'] ?? [], 'system');
+                $collect_globals($page_settings['custom_colors'] ?? [], 'custom');
+                $site_kit['globals'] = $globals;
+
+                $typography_globals = [];
+                $collect_typography = function ($list, $source) use (&$typography_globals, $read_global_id) {
+                    if (!is_array($list)) return;
+                    foreach ($list as $entry) {
+                        if (!is_array($entry)) continue;
+                        $id = $read_global_id($entry);
+                        if ($id === null) continue;
+                        $family = isset($entry['typography_font_family']) ? $entry['typography_font_family'] : null;
+                        $weight = isset($entry['typography_font_weight']) ? $entry['typography_font_weight'] : null;
+                        $family = (is_string($family) && $family !== '') ? $family : null;
+                        if (is_int($weight)) {
+                            $weight = (string) $weight;
+                        }
+                        $weight = (is_string($weight) && $weight !== '') ? $weight : null;
+                        $typography_globals[] = [
+                            'id'     => $id,
+                            'title'  => isset($entry['title']) ? (string) $entry['title'] : '',
+                            'family' => $family,
+                            'weight' => $weight,
+                            'source' => $source,
+                        ];
+                    }
+                };
+                $collect_typography($page_settings['system_typography'] ?? [], 'system');
+                $collect_typography($page_settings['custom_typography'] ?? [], 'custom');
+                $site_kit['typography_globals'] = $typography_globals;
             }
         }
 
