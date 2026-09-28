@@ -207,8 +207,12 @@ class Superman_Links_Webhook {
             'sslverify' => true,
         ];
 
+        // Never log the api_key. PHP error logs are readable by anyone with
+        // hosting or file access, and this runs on every post save.
+        $logged_payload = $payload;
+        unset($logged_payload['api_key']);
         error_log('Superman Links Webhook: Sending to ' . $this->webhook_url);
-        error_log('Superman Links Webhook: Payload - ' . wp_json_encode($payload));
+        error_log('Superman Links Webhook: Payload - ' . wp_json_encode($logged_payload));
 
         $response = wp_remote_post($this->webhook_url, $args);
 

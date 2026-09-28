@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.3
 Tested up to: 6.7
-Stable tag: 2.3.9
+Stable tag: 2.3.10
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,9 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 2.3.10 =
+* SECURITY: the post webhook wrote its whole payload to the PHP error log on every post save or delete, including the site's `api_key`. Anyone with hosting or file access to the site could read the key from `php_errorlog`. The key is now removed from the logged copy; the request to the CRM is unchanged. Found on topdawg.ca on 2026-09-28. Keys already written to existing logs stay there until the log is cleared or rotated.
 
 = 2.3.7 =
 * FIX: the review widget could fatal a page (white screen) if its stored data was not in the expected shape. `empty()` passes for a non-empty string, so a `reviews` value that was not an array reached count() and array_slice(), both a TypeError in PHP 8. Found by fuzzing the stored row rather than by reading the code.
