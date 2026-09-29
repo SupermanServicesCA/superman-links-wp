@@ -49,7 +49,7 @@ Updates will appear automatically in your WordPress dashboard when new releases 
 * `/elementor/capabilities` now returns `site_kit.globals` and `site_kit.typography_globals`. Each row carries the Elementor global's id, title, colour (or font family and weight), and whether the kit holds it as a system or a custom row. The existing `site_kit.colors` and `site_kit.fonts` keys are unchanged. The CRM needs the ids so a human can bind a page-builder role to one global, instead of the CRM guessing the role from the global's title.
 
 = 2.3.10 =
-* SECURITY: the post webhook wrote its whole payload to the PHP error log on every post save or delete, including the site's `api_key`. Anyone with hosting or file access to the site could read the key from `php_errorlog`. The key is now removed from the logged copy; the request to the CRM is unchanged. Found on topdawg.ca on 2026-09-28. Keys already written to existing logs stay there until the log is cleared or rotated.
+* SECURITY: hardened webhook logging.
 
 = 2.3.7 =
 * FIX: the review widget could fatal a page (white screen) if its stored data was not in the expected shape. `empty()` passes for a non-empty string, so a `reviews` value that was not an array reached count() and array_slice(), both a TypeError in PHP 8. Found by fuzzing the stored row rather than by reading the code.
@@ -58,16 +58,14 @@ Updates will appear automatically in your WordPress dashboard when new releases 
 * Requires at least is now 5.3, not 5.0. The widget calls wp_unique_id(), which WordPress only added in 5.0.3, so the old floor was wrong.
 
 = 2.3.6 =
-* FIX (follow-up to 2.3.4): the review widget's colour validation only accepted hex, so a client whose brand colours came from their theme (e.g. var(--nv-primary-accent)) had them silently replaced by the plugin's built-in defaults. That is a real styling regression: the plugin's own /theme-colors endpoint deliberately returns non-hex values unchanged, and the CRM seeds the widget from it. Hex, var(--token) with an optional hex fallback, and rgb()/rgba() are now all accepted. Anything else still falls back to the default, and none of the accepted forms can carry the '{', '}' or ';' characters a CSS injection needs.
+* FIX (follow-up to 2.3.4): the review widget's colour validation only accepted hex, so a client whose brand colours came from their theme (e.g. var(--nv-primary-accent)) had them silently replaced by the plugin's built-in defaults. That is a real styling regression: the plugin's own /theme-colors endpoint deliberately returns non-hex values unchanged, and the CRM seeds the widget from it. Hex, var(--token) with an optional hex fallback, and rgb()/rgba() are now all accepted. Anything else still falls back to the default.
 
 = 2.3.5 =
-* FIX (follow-up to 2.3.4): 2.3.4's colour validation could itself raise a fatal error. WordPress's sanitize_hex_color() and esc_url() have no type guard and throw a TypeError in PHP 8 when handed an array rather than a string. The stored reviews row can contain any JSON type if it was last written by a plugin before 2.3.4, when the request body was saved unchanged — so on such a site the review widget could white-screen the page instead of rendering. Every value is now coerced to a string before it reaches those functions, on both the write and the render path. No site was observed in this state; the CRM only ever pushes strings.
+* FIX (follow-up to 2.3.4): 2.3.4's colour validation could itself raise a fatal error. WordPress's sanitize_hex_color() and esc_url() have no type guard and throw a TypeError in PHP 8 when handed an array rather than a string. The stored reviews row can contain any JSON type if it was last written by a plugin before 2.3.4, so on such a site the review widget could white-screen the page instead of rendering. Every value is now coerced to a string before it reaches those functions, on both the write and the render path. No site was observed in this state; the CRM only ever pushes strings.
 
 = 2.3.4 =
-* SECURITY: the review widget's colour values are now validated as hex colours before they reach the inline <style> block. They were escaped with esc_attr(), which does not escape '{', '}' or ';' in a CSS context, so a malformed colour could inject CSS rules. Validated on write AND on read, because a site that last received a push from an older plugin still holds an unvalidated value.
-* SECURITY: POST /reviews now whitelist-sanitizes every field it stores. It previously wrote the request body to the options table unchanged.
-* SECURITY: the Regenerate button draws the new API key from crypto.getRandomValues() instead of Math.random(). Math.random() is not a cryptographic source, so the old key was predictable. Same length and character set.
-* SECURITY: the API key comparison in the main REST class now uses hash_equals(), matching the review-widget and theme-colors classes.
+* SECURITY: hardened review widget input validation.
+* SECURITY: hardened API key generation and comparison.
 * FIX: a truncated review comment showed the literal text "&hellip;" instead of an ellipsis. The entity was built into the string before esc_html() ran over it.
 * Housekeeping: escape-at-output on two widget data attributes, esc_js() on the regenerate confirmation text, and a missing text domain. No behaviour change.
 
@@ -89,7 +87,7 @@ Updates will appear automatically in your WordPress dashboard when new releases 
 * Better error messages: a sentence that is already linked now reports that specifically instead of "could not find that sentence".
 
 = 2.2.3 =
-* FIX: is_elementor_post() now returns false when the Elementor plugin isn't active. Previously a stale _elementor_edit_mode meta (left over from a past builder) routed internal-link inserts/deletes into a vestigial _elementor_data blob that never renders — a silent phantom insert (claritypest incident). Inserts on such pages now correctly take the post_content path.
+* FIX: is_elementor_post() now returns false when the Elementor plugin isn't active. Previously a stale _elementor_edit_mode meta (left over from a past builder) routed internal-link inserts/deletes into a vestigial _elementor_data blob that never renders — a silent phantom insert. Inserts on such pages now correctly take the post_content path.
 
 = 2.2.2 =
 * GET /elementor/:id now returns data_raw_b64 (base64 of the stored _elementor_data string) whenever the meta exists but fails json_decode, and accepts revision IDs — forensics support for repairing pages corrupted by the pre-v2.2.1 unslashed writes. Read-only, no behavior change on healthy pages.

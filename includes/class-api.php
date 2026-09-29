@@ -1031,7 +1031,7 @@ class Superman_Links_API {
         // A page cannot be "an Elementor post" on a site where Elementor isn't
         // running — stale _elementor_edit_mode meta (left from a past builder)
         // otherwise routes internal-link writes into a vestigial _elementor_data
-        // blob that never renders (silent phantom inserts; claritypest incident).
+        // blob that never renders (silent phantom inserts).
         if (!$this->is_elementor_active()) {
             return false;
         }
@@ -3345,7 +3345,7 @@ class Superman_Links_API {
      *
      * Pre-2.3.0 this method had three silent post_content fallbacks — a walk
      * miss, an unparseable tree, and a failed append. All three produced links
-     * the CRM recorded as live and that no visitor could ever see (S211d).
+     * the CRM recorded as live and that no visitor could ever see.
      */
     private function insert_link_elementor($post_id, $target_url, $anchor_text, $match_context = null) {
         $elementor_data = get_post_meta($post_id, '_elementor_data', true);
@@ -3362,7 +3362,7 @@ class Superman_Links_API {
         if (!is_array($data)) {
             // Corrupted _elementor_data. The front-end keeps rendering from
             // Elementor's element cache, so writing post_content here would be
-            // a guaranteed phantom (this is exactly the S211d corruption state).
+            // a guaranteed phantom (this is exactly the known corruption state).
             return new WP_Error(
                 'elementor_data_corrupt',
                 __("This page's Elementor data could not be parsed, so no link was inserted. Inspect the raw data via GET /elementor/:id (it returns data_raw_b64 when decoding fails) and repair the page before retrying.", 'superman-links'),
@@ -3451,9 +3451,8 @@ class Superman_Links_API {
      *
      * TODO (needs a real dump before coding): the classic free toggle/accordion/
      * tabs widgets keep their body copy in the repeater settings.tabs[] under
-     * 'tab_content'. That shape was observed live during S211d on
-     * bugmanpestcontrol.ca/spiders/ (post 423) but could not be re-dumped at
-     * implementation time — SiteGround's anti-bot walls the API from this IP.
+     * 'tab_content'. That shape was observed live on a client site but could
+     * not be re-dumped at implementation time (host anti-bot blocked the API).
      * NB it is NOT the same shape as Elementor Pro's nested-accordion, which
      * uses settings.items[] with 'item_title' and whose answers are child
      * widgets the recursive walk already reaches. Until a dump confirms it,
