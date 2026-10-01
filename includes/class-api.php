@@ -3024,8 +3024,14 @@ class Superman_Links_API {
         }
         foreach ($xpath->query('//a') as $a) {
             $atext = strtolower($this->normalize_whitespace($a->textContent));
-            if (strlen($atext) > 2 &&
-                (strpos($context_norm, $atext) !== false || strpos($atext, $context_norm) !== false)) {
+            if (strlen($atext) <= 2) {
+                continue;
+            }
+            // Whole words only (v2.3.12). A plain strpos let an "ants" link
+            // match "plants", so a sentence with no link inside it got the
+            // already-linked message instead of context_not_found.
+            $word = '/(?<![\p{L}\p{N}])' . preg_quote($atext, '/') . '(?![\p{L}\p{N}])/u';
+            if (preg_match($word, $context_norm) === 1 || strpos($atext, $context_norm) !== false) {
                 return true;
             }
         }
