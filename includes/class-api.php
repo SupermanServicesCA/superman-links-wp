@@ -147,6 +147,20 @@ class Superman_Links_API {
             ],
         ]);
 
+        // v2.4.1: the current snapshot of a page, without creating a revision
+        register_rest_route($this->namespace, '/pages/(?P<id>\d+)/snapshot', [
+            'methods' => 'GET',
+            'callback' => [$this, 'get_page_snapshot'],
+            'permission_callback' => [$this, 'check_api_key'],
+        ]);
+
+        // v2.4.1: restore a page from a backup revision or a snapshot
+        register_rest_route($this->namespace, '/pages/(?P<id>\d+)/restore', [
+            'methods' => 'POST',
+            'callback' => [$this, 'restore_page'],
+            'permission_callback' => [$this, 'check_api_key'],
+        ]);
+
         // Update page focus keyword
         register_rest_route($this->namespace, '/pages/(?P<id>\d+)/focus-keyword', [
             'methods' => 'POST',
@@ -977,10 +991,11 @@ class Superman_Links_API {
                 continue;
             }
 
-            // Update the post title
+            // Update the post title. wp_slash() after the sanitizer (v2.4.1):
+            // wp_update_post unslashes, so "AC\DC Live" stored as "ACDC Live".
             $update_result = wp_update_post([
                 'ID' => $post_id,
-                'post_title' => sanitize_text_field($title),
+                'post_title' => wp_slash(sanitize_text_field($title)),
             ], true);
 
             if (is_wp_error($update_result)) {
@@ -1545,7 +1560,7 @@ class Superman_Links_API {
 
         // Create the new post
         $post_data = [
-            'post_title' => sanitize_text_field($title),
+            'post_title' => wp_slash(sanitize_text_field($title)), // wp_insert_post unslashes (v2.4.1)
             'post_type' => $post_type,
             'post_status' => $status,
             'post_content' => '', // Elementor handles content
@@ -1618,13 +1633,18 @@ class Superman_Links_API {
             }
         }
 
+        // wp_slash() after each sanitizer (v2.4.1): wp_update_post and
+        // wp_insert_post unslash, so without it a JSON-LD \" and
+        // C:\Program Files lost their backslashes. kses stays on here on
+        // purpose: this is CRM-authored HTML, not the page's own content.
         $post_data = [
             'post_status'  => $status,
-            'post_title'   => sanitize_text_field($title),
-            'post_content' => wp_kses_post($content_html),
-            'post_excerpt' => sanitize_textarea_field($excerpt),
+            'post_title'   => wp_slash(sanitize_text_field($title)),
+            'post_content' => wp_slash(wp_kses_post($content_html)),
+            'post_excerpt' => wp_slash(sanitize_textarea_field($excerpt)),
         ];
 
+        $backup = null;
         if ($existing_id) {
             // Re-publish: update in place. Deliberately do NOT touch the slug —
             // the existing permalink is the key the staged tracked link points at,
@@ -1651,6 +1671,7 @@ class Superman_Links_API {
             }
 
             $post_data['ID'] = $existing_id;
+            $backup = $this->snapshot_before_write($existing_id, 'content_publish');
             $result = wp_update_post($post_data, true);
         } else {
             $post_data['post_type'] = 'post';
@@ -1697,6 +1718,8 @@ class Superman_Links_API {
             'status'            => get_post_status($post_id),
             'already_published' => $existing_id ? true : false,
             'updated'           => $existing_id ? true : false,
+            // v2.4.1: the before-image when an existing post was updated; null for a new post.
+            'backup'            => $backup,
         ]);
     }
 
@@ -1713,6 +1736,10 @@ class Superman_Links_API {
         // which leaves `_elementor_data` as invalid JSON and Elementor
         // silently drops every element on load. `wp_slash()` preserves them.
         $elementor_json = is_array($elementor_data) ? wp_json_encode($elementor_data) : $elementor_data;
+
+        // v2.4.1: before-image of an existing page. /elementor/import creates
+        // a new post, so it has nothing to back up and returns backup: null.
+        $backup = $is_new ? null : $this->snapshot_before_write($post_id, 'elementor_template_update');
 
         // Update Elementor meta
         update_post_meta($post_id, '_elementor_data', wp_slash($elementor_json));
@@ -1734,6 +1761,9 @@ class Superman_Links_API {
         // Regenerate Elementor CSS
         $this->regenerate_elementor_css($post_id);
 
+        // Raw meta writes fire no save_post: touch so cache purges and the webhook run.
+        $this->after_content_write($post_id, true, null);
+
         // Get the updated post
         $post = get_post($post_id);
 
@@ -1745,6 +1775,7 @@ class Superman_Links_API {
             'status' => $post->post_status,
             'is_new' => $is_new,
             'elementor_version' => ELEMENTOR_VERSION,
+            'backup' => $backup,
             'message' => $is_new
                 ? __('New page created from template.', 'superman-links')
                 : __('Page updated with template.', 'superman-links'),
@@ -2593,12 +2624,25 @@ class Superman_Links_API {
             return $result;
         }
 
+        // v2.4.1: a raw _elementor_data write fires no save_post, so touch the
+        // post (cache purge hooks + webhook). A post_content write already did.
+        // Then check the public page for the link once.
+        $cache_stale = $this->after_content_write(
+            $source_post_id,
+            is_array($result) && !empty($result['meta_write']),
+            $target_url
+        );
+
         return rest_ensure_response([
             'success' => true,
             'source_post_id' => $source_post_id,
             'target_url' => $target_url,
             'anchor_text' => $anchor_text,
             'is_elementor' => $is_elementor,
+            // v2.4.1: the page before this write (snapshot array), for the CRM to store.
+            'backup' => is_array($result) && isset($result['backup']) ? $result['backup'] : null,
+            // v2.4.1: true = written, but the public page still serves a cached copy without the link.
+            'cache_stale' => $cache_stale,
             'mode' => is_array($result) && isset($result['mode']) ? $result['mode'] : 'append',
             // {element_id, widget_type, setting} when the link was placed inside
             // an Elementor widget; null for post_content writes and appends.
@@ -2632,6 +2676,10 @@ class Superman_Links_API {
 
         $is_elementor = $this->is_elementor_post($source_post_id);
         $unwrapped_anywhere = false;
+        // v2.4.1: one before-image, taken just before the first write.
+        $backup = null;
+        $meta_written = false;
+        $content_written = false;
 
         if ($is_elementor) {
             $elementor_data = get_post_meta($source_post_id, '_elementor_data', true);
@@ -2648,6 +2696,7 @@ class Superman_Links_API {
                     );
                 }
                 if ($this->unwrap_in_elementor_widgets($data, $target_url)) {
+                    $backup = $this->snapshot_before_write($source_post_id, 'internal_link_delete');
                     if (!$this->write_internal_links_elementor_data($source_post_id, $data)) {
                         return new WP_Error(
                             'elementor_write_failed',
@@ -2656,6 +2705,7 @@ class Superman_Links_API {
                         );
                     }
                     $unwrapped_anywhere = true;
+                    $meta_written = true;
                 }
             }
         }
@@ -2665,14 +2715,16 @@ class Superman_Links_API {
         if (!empty($post->post_content)) {
             $unwrapped_html = $this->unwrap_anchor_in_html($post->post_content, $target_url);
             if ($unwrapped_html !== null) {
-                $result = wp_update_post([
-                    'ID' => $source_post_id,
-                    'post_content' => wp_slash($unwrapped_html), // wp_update_post unslashes; see insert_link_standard()
-                ], true);
+                if ($backup === null) {
+                    $backup = $this->snapshot_before_write($source_post_id, 'internal_link_delete');
+                }
+                // wp_slash() + kses detached; see insert_link_standard().
+                $result = $this->update_post_content_unfiltered($source_post_id, $unwrapped_html);
                 if (is_wp_error($result)) {
                     return $result;
                 }
                 $unwrapped_anywhere = true;
+                $content_written = true;
             }
         }
 
@@ -2684,11 +2736,15 @@ class Superman_Links_API {
             );
         }
 
+        // The content write (if any) ran last and fired save_post after the meta write.
+        $this->after_content_write($source_post_id, $meta_written && !$content_written, null);
+
         return rest_ensure_response([
             'success' => true,
             'source_post_id' => $source_post_id,
             'target_url' => $target_url,
             'is_elementor' => $is_elementor,
+            'backup' => $backup,
         ]);
     }
 
@@ -3297,14 +3353,16 @@ class Superman_Links_API {
                 // render the broken value. 30 fleet pages were damaged this way
                 // (2026-04 to 2026-09). See docs/plans/2026-09-03-plugin-dynamic-block-inserts.md
                 // and tests/test-post-content-slash.php.
-                $result = wp_update_post([
-                    'ID' => $post_id,
-                    'post_content' => wp_slash($wrapped),
-                ], true);
+                // v2.4.1: the before-image is taken here, on the path that
+                // writes, so a 422 below creates no revision. The write goes
+                // through update_post_content_unfiltered: wp_slash() + kses
+                // detached (as user 0, kses stripped iframes and SVGs).
+                $backup = $this->snapshot_before_write($post_id, 'internal_link_insert');
+                $result = $this->update_post_content_unfiltered($post_id, $wrapped);
                 if (is_wp_error($result)) {
                     return $result;
                 }
-                return ['mode' => 'wrap'];
+                return ['mode' => 'wrap', 'backup' => $backup];
             }
             // Strict mode: context was provided but the wrap failed. Distinguish the
             // two real causes so operators don't chase a phantom "stale index".
@@ -3329,16 +3387,15 @@ class Superman_Links_API {
             esc_html($anchor_text)
         );
 
-        $result = wp_update_post([
-            'ID' => $post_id,
-            'post_content' => wp_slash($post->post_content . $link_html), // see the wp_slash note above
-        ], true);
+        $backup = $this->snapshot_before_write($post_id, 'internal_link_insert');
+        // wp_slash() inside the helper; see the wp_slash note above.
+        $result = $this->update_post_content_unfiltered($post_id, $post->post_content . $link_html);
 
         if (is_wp_error($result)) {
             return $result;
         }
 
-        return ['mode' => 'append'];
+        return ['mode' => 'append', 'backup' => $backup];
     }
 
     /**
@@ -3381,6 +3438,9 @@ class Superman_Links_API {
             $visited_html = [];
             $placed = $this->wrap_in_elementor_widgets($data, $match_context, $anchor_text, $target_url, $visited_html);
             if ($placed !== null) {
+                // v2.4.1: before-image on the writing path only ($data is the
+                // in-memory copy; the stored meta is still the old one here).
+                $backup = $this->snapshot_before_write($post_id, 'internal_link_insert');
                 if (!$this->write_internal_links_elementor_data($post_id, $data)) {
                     return new WP_Error(
                         'elementor_write_failed',
@@ -3388,7 +3448,7 @@ class Superman_Links_API {
                         ['status' => 500]
                     );
                 }
-                return ['mode' => 'wrap', 'placed_in' => $placed];
+                return ['mode' => 'wrap', 'placed_in' => $placed, 'backup' => $backup, 'meta_write' => true];
             }
 
             // Walk miss. Before the generic message, distinguish the most common
@@ -3406,7 +3466,7 @@ class Superman_Links_API {
 
             return new WP_Error(
                 'context_not_found_elementor',
-                __("The sentence was found on the page but lives in an Elementor widget the plugin can't edit yet. Nothing was changed — insert it manually in the Elementor editor.", 'superman-links'),
+                __("The sentence was found on the page but lives in an Elementor widget the plugin can't edit yet, or the sentence is driven by a dynamic tag. Nothing was changed — insert it manually in the Elementor editor.", 'superman-links'),
                 ['status' => 422]
             );
         }
@@ -3432,6 +3492,7 @@ class Superman_Links_API {
             );
         }
 
+        $backup = $this->snapshot_before_write($post_id, 'internal_link_insert');
         if (!$this->write_internal_links_elementor_data($post_id, $data)) {
             return new WP_Error(
                 'elementor_write_failed',
@@ -3440,7 +3501,7 @@ class Superman_Links_API {
             );
         }
 
-        return ['mode' => 'append'];
+        return ['mode' => 'append', 'backup' => $backup, 'meta_write' => true];
     }
 
     /**
@@ -3572,6 +3633,10 @@ class Superman_Links_API {
             if (!empty($el['settings']['link']['url'])) continue;
 
             foreach ($fields as $field) {
+                // v2.4.1: a dynamic tag under settings.__dynamic__[field] beats
+                // the literal at render time. Wrapping the literal would report
+                // success for a link no visitor sees. tests/test-backups.php case 6.
+                if (isset($el['settings']['__dynamic__'][$field])) continue;
                 $html = $el['settings'][$field] ?? '';
                 if (!is_string($html) || $html === '') continue;
                 // Collect ONLY widgets whose text actually contains the context
@@ -3655,6 +3720,15 @@ class Superman_Links_API {
      * Regenerate Elementor CSS for a post
      */
     private function regenerate_elementor_css($post_id) {
+        // v2.4.1: delete THIS post's rendered-element cache first, outside the
+        // try. Elementor serves `_elementor_element_cache` for up to 24 hours
+        // (core/base/document.php CACHE_META_KEY, checked in the 4.0.6 and 4.4.0
+        // tags). The site-wide clear_cache() below also deletes it, but it runs
+        // after $css_file->update(); when update() throws, the page kept the
+        // pre-write HTML for a day and the webhook confirm agreed with it.
+        // tests/test-backups.php case 7 guards this line.
+        delete_post_meta($post_id, '_elementor_element_cache');
+
         // Check if Elementor's CSS regeneration is available
         if (class_exists('\\Elementor\\Plugin')) {
             try {
@@ -3672,11 +3746,460 @@ class Superman_Links_API {
                         $elementor->files_manager->clear_cache();
                     }
                 }
-            } catch (Exception $e) {
+            } catch (Throwable $e) {
                 // Log error but don't fail the request
                 error_log('Superman Links: Failed to regenerate Elementor CSS - ' . $e->getMessage());
             }
         }
+    }
+
+    // ==========================================
+    // Safe writes + backups (v2.4.1)
+    // ==========================================
+
+    /** Revision meta key that marks a revision this plugin created as a backup. */
+    const BACKUP_REVISION_META = '_superman_links_backup';
+
+    /** How many plugin-created backup revisions to keep per post. Human revisions are never pruned. */
+    const BACKUP_REVISION_KEEP = 10;
+
+    /** Elementor meta that a snapshot carries, keyed by meta key => snapshot field. */
+    private function snapshot_meta_fields() {
+        return [
+            '_elementor_data'          => 'elementor_data',
+            '_elementor_page_settings' => 'elementor_page_settings',
+            '_elementor_version'       => 'elementor_version',
+            '_elementor_template_type' => 'elementor_template_type',
+            '_elementor_edit_mode'     => 'elementor_edit_mode',
+        ];
+    }
+
+    /**
+     * The backup hash: sha256 of post_content, a NUL byte, and the RAW
+     * _elementor_data string. The CRM recomputes it in SQL over bytea (a NUL
+     * cannot sit inside a Postgres text value).
+     */
+    private function snapshot_hash($post_content, $elementor_data_raw) {
+        return hash('sha256', (string) $post_content . "\0" . (string) $elementor_data_raw);
+    }
+
+    /**
+     * Read _elementor_data as the raw stored string. Never decode it: a
+     * decode and re-encode changes escapes, and a restore must write back
+     * exactly the bytes that were there.
+     */
+    private function raw_elementor_data($post_id) {
+        $raw = get_post_meta($post_id, '_elementor_data', true);
+        if (is_string($raw)) {
+            return $raw;
+        }
+        // Very old sites stored an array. Encode it once so the hash and the
+        // restore have a string to work with.
+        if (is_array($raw)) {
+            $json = wp_json_encode($raw);
+            return is_string($json) ? $json : '';
+        }
+        return '';
+    }
+
+    /** Build the snapshot array for a post as it is now. Creates nothing. */
+    private function build_snapshot($post, $reason, $revision_id = null) {
+        $post_id = (int) $post->ID;
+        $content = (string) $post->post_content;
+        $data_raw = $this->raw_elementor_data($post_id);
+        return [
+            'revision_id'             => $revision_id ? (int) $revision_id : null,
+            'post_content'            => $content,
+            'post_modified_gmt'       => $post->post_modified_gmt ?? null,
+            'elementor_data'          => $data_raw,
+            'elementor_page_settings' => get_post_meta($post_id, '_elementor_page_settings', true),
+            'elementor_version'       => get_post_meta($post_id, '_elementor_version', true),
+            'elementor_template_type' => get_post_meta($post_id, '_elementor_template_type', true),
+            'elementor_edit_mode'     => get_post_meta($post_id, '_elementor_edit_mode', true),
+            'sha256'                  => $this->snapshot_hash($content, $data_raw),
+            'bytes'                   => strlen($content) + strlen($data_raw),
+            'reason'                  => $reason,
+        ];
+    }
+
+    /**
+     * Take the before-image of a post. Call it immediately BEFORE a write,
+     * never after: a backup taken after the write keeps the damage it exists
+     * to undo. Callers call it only on the path that is about to write, so a
+     * 422 refusal creates no revision and returns no backup.
+     *
+     * 1. A native WordPress revision. The check_for_changes filter is required:
+     *    without it WordPress skips the revision when post_content did not
+     *    change, and a raw _elementor_data write never changes post_content.
+     *    Elementor's revisions manager copies every _elementor* meta into the
+     *    revision on `_wp_put_post_revision` (modules/history/revisions-manager.php,
+     *    4.0.6 tag), so WP admin -> Revisions can also restore it.
+     * 2. The snapshot array, returned to the CRM, which stores it.
+     *
+     * Returns null when the post does not exist.
+     */
+    private function snapshot_before_write($post_id, $reason) {
+        $post = get_post($post_id);
+        if (!$post) {
+            return null;
+        }
+        $revision_id = $this->create_backup_revision((int) $post_id, $reason);
+        return $this->build_snapshot($post, $reason, $revision_id);
+    }
+
+    /**
+     * Create a backup revision and prune our old ones. Returns the revision id
+     * or null (revisions off for the post type, WP_POST_REVISIONS = false, or
+     * an error). Null is not an error: the CRM copy is the durable backup.
+     */
+    private function create_backup_revision($post_id, $reason) {
+        if (!function_exists('wp_save_post_revision')) {
+            return null;
+        }
+        $revision_id = null;
+        add_filter('wp_save_post_revision_check_for_changes', '__return_false');
+        try {
+            $revision_id = wp_save_post_revision($post_id);
+        } catch (Throwable $e) {
+            error_log('Superman Links: backup revision failed for post ' . (int) $post_id . ' - ' . $e->getMessage());
+            $revision_id = null;
+        } finally {
+            remove_filter('wp_save_post_revision_check_for_changes', '__return_false');
+        }
+        if (!$revision_id || is_wp_error($revision_id)) {
+            return null;
+        }
+        // update_metadata, not update_post_meta: update_post_meta redirects a
+        // revision id to its parent post.
+        update_metadata('post', (int) $revision_id, self::BACKUP_REVISION_META, sanitize_key($reason));
+        $this->prune_backup_revisions($post_id);
+        return (int) $revision_id;
+    }
+
+    /**
+     * Keep the newest BACKUP_REVISION_KEEP revisions that THIS plugin created
+     * for the post; delete older ones. A revision without our meta key was made
+     * by a human or another plugin and is never touched.
+     */
+    private function prune_backup_revisions($post_id) {
+        if (!function_exists('wp_get_post_revisions') || !function_exists('wp_delete_post_revision')) {
+            return;
+        }
+        $revisions = wp_get_post_revisions($post_id, ['orderby' => 'ID', 'order' => 'DESC']);
+        if (empty($revisions)) {
+            return;
+        }
+        $ours = [];
+        foreach ($revisions as $revision) {
+            $rid = is_object($revision) ? (int) $revision->ID : (int) $revision;
+            if ((string) get_metadata('post', $rid, self::BACKUP_REVISION_META, true) !== '') {
+                $ours[] = $rid;
+            }
+        }
+        rsort($ours, SORT_NUMERIC);
+        foreach (array_slice($ours, self::BACKUP_REVISION_KEEP) as $old_id) {
+            wp_delete_post_revision($old_id);
+        }
+    }
+
+    /**
+     * wp_update_post() with the kses filters detached, then put back.
+     *
+     * Every plugin request runs as user 0 (check_api_key sets no user), and
+     * kses_init attaches wp_filter_post_kses to content_save_pre for a user
+     * without unfiltered_html. So a plain wp_update_post strips every <iframe>,
+     * <svg>, <script> and <form> on the page, and filters the inside of block
+     * comments. LinkFinder writes and the restore rewrite the page's own
+     * content, so they must not pass through it. The content writer
+     * (create_post) does NOT use this: it keeps wp_kses_post on CRM HTML.
+     *
+     * The caller passes slashed values; wp_update_post unslashes.
+     * tests/test-backups.php case 8 counts the remove/init calls.
+     */
+    private function update_post_unfiltered(array $postarr) {
+        $detached = false;
+        if (function_exists('kses_remove_filters') && function_exists('has_filter')
+            && has_filter('content_save_pre', 'wp_filter_post_kses') !== false) {
+            kses_remove_filters();
+            $detached = true;
+        }
+        try {
+            return wp_update_post($postarr, true);
+        } finally {
+            if ($detached && function_exists('kses_init_filters')) {
+                kses_init_filters();
+            }
+        }
+    }
+
+    /** Write post_content verbatim: wp_slash() (load-bearing, v2.3.9) + kses detached. */
+    private function update_post_content_unfiltered($post_id, $content) {
+        return $this->update_post_unfiltered([
+            'ID'           => (int) $post_id,
+            'post_content' => wp_slash((string) $content),
+        ]);
+    }
+
+    /**
+     * Run after every content write.
+     *
+     * $touch: a raw meta write fires no save_post, so host and cache-plugin
+     * purge hooks never run and the webhook never re-syncs. Touching the post
+     * with wp_update_post(['ID' => id]) fires save_post and clean_post_cache.
+     * The touch goes through the kses-detached helper: wp_update_post re-saves
+     * the stored post_content, and kses would strip it. A write that already
+     * went through wp_update_post passes $touch = false (it fired save_post).
+     *
+     * $target_url: fetch the public permalink once, with no cache-buster, and
+     * report cache_stale = true when the URL is absent. Returns null when no
+     * check ran or the fetch failed.
+     */
+    private function after_content_write($post_id, $touch, $target_url = null) {
+        if ($touch) {
+            $touched = $this->update_post_unfiltered(['ID' => (int) $post_id]);
+            if (is_wp_error($touched)) {
+                error_log('Superman Links: post touch after write failed for post ' . (int) $post_id . ' - ' . $touched->get_error_message());
+            }
+        }
+        if (empty($target_url)) {
+            return null;
+        }
+        return $this->live_page_lacks_url($post_id, $target_url);
+    }
+
+    /** true = the public page does not show $url yet; false = it does; null = not measured. */
+    private function live_page_lacks_url($post_id, $url) {
+        if (!function_exists('wp_remote_get') || !function_exists('get_permalink')) {
+            return null;
+        }
+        $permalink = get_permalink($post_id);
+        if (!$permalink) {
+            return null;
+        }
+        $response = wp_remote_get($permalink, [
+            'timeout'     => 5,
+            'sslverify'   => false,
+            'redirection' => 2,
+        ]);
+        if (is_wp_error($response)) {
+            return null;
+        }
+        $code = (int) wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            return null;
+        }
+        $body = (string) wp_remote_retrieve_body($response);
+        if ($body === '') {
+            return null;
+        }
+        $forms = array_unique([
+            $url,
+            htmlspecialchars($url, ENT_QUOTES),
+            str_replace('&', '&#038;', $url),
+        ]);
+        foreach ($forms as $form) {
+            if ($form !== '' && strpos($body, $form) !== false) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * GET /pages/{id}/snapshot — the current snapshot, with no revision.
+     * The CRM uses it for "Back up now" and for the hash check before a restore.
+     */
+    public function get_page_snapshot($request) {
+        $post_id = (int) $request['id'];
+        $post = get_post($post_id);
+        if (!$post || $post->post_type === 'revision') {
+            return new WP_Error('not_found', __('Page not found.', 'superman-links'), ['status' => 404]);
+        }
+        return rest_ensure_response([
+            'post_id'  => $post_id,
+            'snapshot' => $this->build_snapshot($post, 'manual', null),
+        ]);
+    }
+
+    /**
+     * POST /pages/{id}/restore
+     * Body: { revision_id?, snapshot?, expected_current_sha256?, force? }
+     *
+     * Order: 404 -> 422 snapshot_invalid -> 409 content_changed -> pre-image
+     * backup -> write -> cache delete -> verify.
+     *
+     * The 409 check runs on BOTH paths. The plan said the revision path needs
+     * no hash check; its own dogfood step (edit by hand, expect 409) needs it,
+     * so it runs first for every restore.
+     *
+     * Revision path: when revision_id belongs to this post, restore through
+     * wp_restore_post_revision (Elementor copies its meta back on that hook).
+     * If a snapshot was also sent and the result does not hash to it (for
+     * example Elementor was inactive, so no meta came back), the snapshot path
+     * runs as well.
+     */
+    public function restore_page($request) {
+        $post_id = (int) $request['id'];
+        $post = get_post($post_id);
+        if (!$post || $post->post_type === 'revision') {
+            return new WP_Error('not_found', __('Page not found.', 'superman-links'), ['status' => 404]);
+        }
+
+        $body = $request->get_json_params();
+        $body = is_array($body) ? $body : [];
+        $snapshot = isset($body['snapshot']) && is_array($body['snapshot']) ? $body['snapshot'] : null;
+        $revision_id = isset($body['revision_id']) ? (int) $body['revision_id'] : 0;
+        $expected = isset($body['expected_current_sha256']) && is_string($body['expected_current_sha256'])
+            ? strtolower($body['expected_current_sha256']) : null;
+        $force = !empty($body['force']);
+
+        $use_revision = $revision_id > 0
+            && function_exists('wp_is_post_revision')
+            && function_exists('wp_restore_post_revision')
+            && (int) wp_is_post_revision($revision_id) === $post_id;
+
+        // 1. Validate the payload before anything is written.
+        if ($snapshot !== null) {
+            $invalid = $this->snapshot_problem($snapshot);
+            if ($invalid !== null) {
+                return new WP_Error('snapshot_invalid', $invalid, ['status' => 422]);
+            }
+        }
+        if (!$use_revision && $snapshot === null) {
+            return new WP_Error(
+                'snapshot_invalid',
+                __('No usable revision_id for this page and no snapshot was sent.', 'superman-links'),
+                ['status' => 422]
+            );
+        }
+
+        // 2. Protect an edit made after the backup.
+        $current_sha = $this->snapshot_hash($post->post_content, $this->raw_elementor_data($post_id));
+        if ($expected !== null && $expected !== $current_sha && !$force) {
+            return new WP_Error(
+                'content_changed',
+                __('The page changed after this backup was taken.', 'superman-links'),
+                ['status' => 409, 'current_sha256' => $current_sha]
+            );
+        }
+
+        // 3. A restore is a write. Back up the current state first.
+        $pre_image = $this->snapshot_before_write($post_id, 'restore_pre_image');
+
+        // 4. Write.
+        $method = null;
+        if ($use_revision) {
+            $restored = $this->restore_from_revision($revision_id);
+            if (is_wp_error($restored)) {
+                return $restored;
+            }
+            $method = 'revision';
+            if ($snapshot !== null) {
+                $now = get_post($post_id);
+                $now_sha = $this->snapshot_hash($now ? $now->post_content : '', $this->raw_elementor_data($post_id));
+                if ($now_sha !== strtolower($snapshot['sha256'])) {
+                    $written = $this->write_snapshot($post_id, $snapshot);
+                    if (is_wp_error($written)) {
+                        return $written;
+                    }
+                    $method = 'revision+snapshot';
+                }
+            }
+        } else {
+            $written = $this->write_snapshot($post_id, $snapshot);
+            if (is_wp_error($written)) {
+                return $written;
+            }
+            $method = 'snapshot';
+        }
+
+        // 5. Drop the rendered caches. regenerate_elementor_css deletes the
+        //    element cache again before its own try (step 6).
+        delete_post_meta($post_id, '_elementor_element_cache');
+        delete_post_meta($post_id, '_elementor_css');
+        $this->regenerate_elementor_css($post_id);
+        $this->after_content_write($post_id, true, null);
+
+        // 6. Re-read and hash.
+        $after = get_post($post_id);
+        $after_sha = $this->snapshot_hash($after ? $after->post_content : '', $this->raw_elementor_data($post_id));
+        $target_sha = $snapshot !== null ? strtolower($snapshot['sha256']) : null;
+
+        return rest_ensure_response([
+            'restored'       => true,
+            'method'         => $method,
+            // null when only a revision was sent: nothing to compare against.
+            'verified'       => $target_sha !== null ? hash_equals($target_sha, $after_sha) : null,
+            'pre_image'      => $pre_image,
+            'current_sha256' => $after_sha,
+        ]);
+    }
+
+    /** null when the snapshot is usable, else the reason it is not. */
+    private function snapshot_problem(array $snapshot) {
+        if (!isset($snapshot['post_content']) || !is_string($snapshot['post_content'])) {
+            return __('The snapshot has no post_content.', 'superman-links');
+        }
+        if (empty($snapshot['sha256']) || !is_string($snapshot['sha256'])) {
+            return __('The snapshot has no sha256.', 'superman-links');
+        }
+        $data = $snapshot['elementor_data'] ?? '';
+        if (!is_string($data)) {
+            return __('The snapshot elementor_data is not a string.', 'superman-links');
+        }
+        if (!hash_equals(strtolower($snapshot['sha256']), $this->snapshot_hash($snapshot['post_content'], $data))) {
+            return __('The snapshot sha256 does not match its own content.', 'superman-links');
+        }
+        return null;
+    }
+
+    /** wp_restore_post_revision with kses detached (it re-saves content through wp_update_post). */
+    private function restore_from_revision($revision_id) {
+        $detached = false;
+        if (function_exists('kses_remove_filters') && function_exists('has_filter')
+            && has_filter('content_save_pre', 'wp_filter_post_kses') !== false) {
+            kses_remove_filters();
+            $detached = true;
+        }
+        try {
+            $result = wp_restore_post_revision($revision_id);
+        } finally {
+            if ($detached && function_exists('kses_init_filters')) {
+                kses_init_filters();
+            }
+        }
+        if (!$result || is_wp_error($result)) {
+            return is_wp_error($result) ? $result : new WP_Error(
+                'restore_failed',
+                __('WordPress could not restore that revision.', 'superman-links'),
+                ['status' => 500]
+            );
+        }
+        return true;
+    }
+
+    /**
+     * Write a validated snapshot back verbatim. post_content through the
+     * kses-detached helper; each Elementor meta only when the snapshot holds a
+     * non-empty value (is_string tested: update_post_meta(..., false) writes ''
+     * and wipes the design), else deleted when the post has one now.
+     */
+    private function write_snapshot($post_id, array $snapshot) {
+        $result = $this->update_post_content_unfiltered($post_id, $snapshot['post_content']);
+        if (is_wp_error($result)) {
+            return $result;
+        }
+        foreach ($this->snapshot_meta_fields() as $meta_key => $field) {
+            $value = $snapshot[$field] ?? '';
+            $writable = (is_string($value) && $value !== '')
+                || ($meta_key === '_elementor_page_settings' && is_array($value) && !empty($value));
+            if ($writable) {
+                update_post_meta($post_id, $meta_key, wp_slash($value));
+            } elseif (metadata_exists('post', $post_id, $meta_key)) {
+                delete_post_meta($post_id, $meta_key);
+            }
+        }
+        return true;
     }
 
     // ==========================================
@@ -3980,6 +4503,7 @@ class Superman_Links_API {
             'unknown_keys'   => $first['unknown_keys'],
             'dropped_keys'   => $first['dropped_keys'],
             'round_trip_ok'  => empty($first['dropped_keys']),
+            'backup'         => $result['backup'] ?? null,
         ]);
     }
 
@@ -4026,6 +4550,7 @@ class Superman_Links_API {
             'post_id'       => $post_id,
             'ops'           => $result['ops'],
             'round_trip_ok' => !$any_dropped,
+            'backup'        => $result['backup'] ?? null,
         ]);
     }
 
@@ -4086,11 +4611,16 @@ class Superman_Links_API {
             unset($element);
         }
 
+        // v2.4.1: before-image, after every validation passed, before the one save.
+        $backup = $this->snapshot_before_write($post_id, 'widget_patch');
+
         // One save for the whole batch.
         $saved = $this->write_elementor_tree($post_id, $tree);
         if (!$saved) {
             return new WP_Error('save_failed', 'Failed to write _elementor_data.', ['status' => 500]);
         }
+        // Raw meta write: touch for cache purge hooks + webhook.
+        $this->after_content_write($post_id, true, null);
 
         // Round-trip verify: re-read and compare every requested key against
         // the stored settings. Surfaces silent-drop bugs (wp_slash regressions,
@@ -4119,7 +4649,7 @@ class Superman_Links_API {
             ];
         }
 
-        return ['ops' => $out_ops];
+        return ['ops' => $out_ops, 'backup' => $backup];
     }
 
     /**
@@ -4148,41 +4678,33 @@ class Superman_Links_API {
     }
 
     /**
-     * Write Elementor tree via document save with raw post_meta fallback +
-     * CSS cache bust. The wp_slash() wrap on the fallback is load-bearing —
-     * see v1.8.1.
+     * Write the Elementor tree as raw post meta + CSS cache bust. The
+     * wp_slash() wrap is load-bearing — see v1.8.1.
+     *
+     * v2.4.1 removed the $document->save() branch. It never wrote: every
+     * plugin request runs as user 0, and Document::save() returns false when
+     * is_editable_by_current_user() is false (Elementor core/base/document.php,
+     * checked in the 4.0.6 and 4.4.0 tags), which ends in current_user_can().
+     * Do not add wp_set_current_user() to make it work: that would also turn on
+     * Elementor's own revision, plain-text and after_save hooks in a request
+     * that never ran them.
      */
     private function write_elementor_tree($post_id, array $tree) {
-        $saved_via_document = false;
-        if (class_exists('\\Elementor\\Plugin')) {
-            try {
-                $document = \Elementor\Plugin::$instance->documents->get($post_id);
-                if ($document && method_exists($document, 'save')) {
-                    $saved_via_document = (bool) $document->save(['elements' => $tree]);
-                }
-            } catch (Exception $e) {
-                $saved_via_document = false;
-            }
+        $json = wp_json_encode($tree);
+        if ($json === false) {
+            return false;
+        }
+        update_post_meta($post_id, '_elementor_data', wp_slash($json));
+        update_post_meta($post_id, '_elementor_edit_mode', 'builder');
+        if (defined('ELEMENTOR_VERSION')) {
+            update_post_meta($post_id, '_elementor_version', ELEMENTOR_VERSION);
+        }
+        delete_post_meta($post_id, '_elementor_css');
+        $cached = WP_CONTENT_DIR . '/uploads/elementor/css/post-' . (int) $post_id . '.css';
+        if (file_exists($cached)) {
+            @unlink($cached);
         }
 
-        if (!$saved_via_document) {
-            $json = wp_json_encode($tree);
-            if ($json === false) {
-                return false;
-            }
-            update_post_meta($post_id, '_elementor_data', wp_slash($json));
-            update_post_meta($post_id, '_elementor_edit_mode', 'builder');
-            if (defined('ELEMENTOR_VERSION')) {
-                update_post_meta($post_id, '_elementor_version', ELEMENTOR_VERSION);
-            }
-            delete_post_meta($post_id, '_elementor_css');
-            $cached = WP_CONTENT_DIR . '/uploads/elementor/css/post-' . (int) $post_id . '.css';
-            if (file_exists($cached)) {
-                @unlink($cached);
-            }
-        }
-
-        // Belt-and-suspenders on both paths.
         $this->regenerate_elementor_css($post_id);
         return true;
     }
