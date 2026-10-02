@@ -1720,6 +1720,7 @@ class Superman_Links_API {
             'updated'           => $existing_id ? true : false,
             // v2.4.1: the before-image when an existing post was updated; null for a new post.
             'backup'            => $backup,
+            'after_sha256'      => $this->current_sha256($post_id),
         ]);
     }
 
@@ -1776,6 +1777,7 @@ class Superman_Links_API {
             'is_new' => $is_new,
             'elementor_version' => ELEMENTOR_VERSION,
             'backup' => $backup,
+            'after_sha256' => $this->current_sha256($post_id),
             'message' => $is_new
                 ? __('New page created from template.', 'superman-links')
                 : __('Page updated with template.', 'superman-links'),
@@ -2641,6 +2643,8 @@ class Superman_Links_API {
             'is_elementor' => $is_elementor,
             // v2.4.1: the page before this write (snapshot array), for the CRM to store.
             'backup' => is_array($result) && isset($result['backup']) ? $result['backup'] : null,
+            // v2.4.1: hash of the page after this write; the CRM sends it back as expected_current_sha256.
+            'after_sha256' => $this->current_sha256($source_post_id),
             // v2.4.1: true = written, but the public page still serves a cached copy without the link.
             'cache_stale' => $cache_stale,
             'mode' => is_array($result) && isset($result['mode']) ? $result['mode'] : 'append',
@@ -2745,6 +2749,7 @@ class Superman_Links_API {
             'target_url' => $target_url,
             'is_elementor' => $is_elementor,
             'backup' => $backup,
+            'after_sha256' => $this->current_sha256($source_post_id),
         ]);
     }
 
@@ -3802,6 +3807,17 @@ class Superman_Links_API {
         return '';
     }
 
+    /**
+     * The snapshot hash of the post as stored now. Returned as `after_sha256`
+     * by every write, so the CRM can send it back as expected_current_sha256:
+     * a restore then gets 409 when anyone (a human, or a later CRM write)
+     * changed the page after this write.
+     */
+    private function current_sha256($post_id) {
+        $post = get_post($post_id);
+        return $post ? $this->snapshot_hash($post->post_content, $this->raw_elementor_data($post_id)) : null;
+    }
+
     /** Build the snapshot array for a post as it is now. Creates nothing. */
     private function build_snapshot($post, $reason, $revision_id = null) {
         $post_id = (int) $post->ID;
@@ -4504,6 +4520,7 @@ class Superman_Links_API {
             'dropped_keys'   => $first['dropped_keys'],
             'round_trip_ok'  => empty($first['dropped_keys']),
             'backup'         => $result['backup'] ?? null,
+            'after_sha256'   => $this->current_sha256($post_id),
         ]);
     }
 
@@ -4551,6 +4568,7 @@ class Superman_Links_API {
             'ops'           => $result['ops'],
             'round_trip_ok' => !$any_dropped,
             'backup'        => $result['backup'] ?? null,
+            'after_sha256'  => $this->current_sha256($post_id),
         ]);
     }
 
