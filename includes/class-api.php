@@ -471,6 +471,22 @@ class Superman_Links_API {
 
         $kit_id = (int) get_option('elementor_active_kit');
         if ($kit_id > 0) {
+            // Raw kit rows, ids kept, kit order preserved. No dedupe, no
+            // bucketing, no truncation: the CRM stores a human binding of
+            // role -> id, so it needs every row exactly as the kit holds it.
+            // The kit repeater keys a row as `_id` — verified in Elementor
+            // 4.3.2, core/kits/documents/tabs/global-colors.php, which
+            // declares `'_id' => 'primary'` and renders
+            // `--e-global-color-{{_id.VALUE}}`. global-typography.php uses
+            // `_id` too. The Elementor REST route renames it to `id`, so
+            // accept both; `_id` is the branch that fires on this meta.
+            $read_global_id = function ($entry) {
+                $id = isset($entry['_id']) ? $entry['_id'] : (isset($entry['id']) ? $entry['id'] : null);
+                if (!is_string($id) && !is_int($id)) return null;
+                $id = (string) $id;
+                return $id === '' ? null : $id;
+            };
+
             $page_settings = get_post_meta($kit_id, '_elementor_page_settings', true);
             if (is_string($page_settings)) {
                 $page_settings = json_decode($page_settings, true);
@@ -539,21 +555,6 @@ class Superman_Links_API {
                 }
                 $site_kit['fonts'] = array_values($fonts);
 
-                // Raw kit rows, ids kept, kit order preserved. No dedupe, no
-                // bucketing, no truncation: the CRM stores a human binding of
-                // role -> id, so it needs every row exactly as the kit holds it.
-                // The kit repeater keys a row as `_id` — verified in Elementor
-                // 4.3.2, core/kits/documents/tabs/global-colors.php, which
-                // declares `'_id' => 'primary'` and renders
-                // `--e-global-color-{{_id.VALUE}}`. global-typography.php uses
-                // `_id` too. The Elementor REST route renames it to `id`, so
-                // accept both; `_id` is the branch that fires on this meta.
-                $read_global_id = function ($entry) {
-                    $id = isset($entry['_id']) ? $entry['_id'] : (isset($entry['id']) ? $entry['id'] : null);
-                    if (!is_string($id) && !is_int($id)) return null;
-                    $id = (string) $id;
-                    return $id === '' ? null : $id;
-                };
 
                 $globals = [];
                 $collect_globals = function ($list, $source) use (&$globals, $read_global_id) {
@@ -600,6 +601,130 @@ class Superman_Links_API {
                 $collect_typography($page_settings['system_typography'] ?? [], 'system');
                 $collect_typography($page_settings['custom_typography'] ?? [], 'custom');
                 $site_kit['typography_globals'] = $typography_globals;
+            }
+
+            // --- Theme-registered globals (source: 'theme') -----------------
+            //
+            // A theme can register its own Elementor globals at runtime. Neve
+            // does: it prints --e-global-color-nvtextcolor in its OWN inline
+            // CSS and tells Elementor about the colour, so the row never
+            // reaches _elementor_page_settings and the meta read above cannot
+            // see it.
+            //
+            // Measured on fusepowerwashing.com, 2026-10-12, signed in:
+            // Elementor's GET /wp-json/elementor/v1/globals returned 16 colours,
+            // the meta read returned 6, and the 10 missing were the only ones
+            // the site actually renders with - including nvtextcolor #272626,
+            // the colour behind the 2.08:1 lavender that shipped to
+            // precisionwindowwashing.ca. 8 of 21 fleet sites run Neve.
+            //
+            // get_settings() runs Elementor's filters, which is the hook a
+            // theme registers through. The meta read stays as the base, so a
+            // site where this returns nothing behaves exactly as before.
+            $kit_settings = [];
+            if (class_exists('\\Elementor\\Plugin')) {
+                $el = \Elementor\Plugin::$instance;
+                if ($el && isset($el->kits_manager) && method_exists($el->kits_manager, 'get_active_kit')) {
+                    $kit = $el->kits_manager->get_active_kit();
+                    if ($kit && method_exists($kit, 'get_settings')) {
+                        $maybe = $kit->get_settings();
+                        if (is_array($maybe)) {
+                            $kit_settings = $maybe;
+                        }
+                    }
+                }
+            }
+
+            if (!empty($kit_settings)) {
+                $seen_colors = [];
+                foreach ($site_kit['globals'] as $g) {
+                    $seen_colors[$g['id']] = true;
+                }
+                $seen_typo = [];
+                foreach ($site_kit['typography_globals'] as $g) {
+                    $seen_typo[$g['id']] = true;
+                }
+
+                foreach (['system_colors', 'custom_colors'] as $bucket) {
+                    $list = isset($kit_settings[$bucket]) ? $kit_settings[$bucket] : [];
+                    if (!is_array($list)) continue;
+                    foreach ($list as $entry) {
+                        if (!is_array($entry)) continue;
+                        $id = $read_global_id($entry);
+                        if ($id === null || isset($seen_colors[$id])) continue;
+                        $seen_colors[$id] = true;
+                        $site_kit['globals'][] = [
+                            'id'     => $id,
+                            'title'  => isset($entry['title']) ? (string) $entry['title'] : '',
+                            'color'  => isset($entry['color']) ? (string) $entry['color'] : '',
+                            'source' => 'theme',
+                        ];
+                    }
+                }
+
+                foreach (['system_typography', 'custom_typography'] as $bucket) {
+                    $list = isset($kit_settings[$bucket]) ? $kit_settings[$bucket] : [];
+                    if (!is_array($list)) continue;
+                    foreach ($list as $entry) {
+                        if (!is_array($entry)) continue;
+                        $id = $read_global_id($entry);
+                        if ($id === null || isset($seen_typo[$id])) continue;
+                        $seen_typo[$id] = true;
+                        $family = isset($entry['typography_font_family']) ? $entry['typography_font_family'] : null;
+                        $weight = isset($entry['typography_font_weight']) ? $entry['typography_font_weight'] : null;
+                        $family = (is_string($family) && $family !== '') ? $family : null;
+                        if (is_int($weight)) {
+                            $weight = (string) $weight;
+                        }
+                        $weight = (is_string($weight) && $weight !== '') ? $weight : null;
+                        $site_kit['typography_globals'][] = [
+                            'id'     => $id,
+                            'title'  => isset($entry['title']) ? (string) $entry['title'] : '',
+                            'family' => $family,
+                            'weight' => $weight,
+                            'source' => 'theme',
+                        ];
+                    }
+                }
+            }
+
+            // --- V4 atomic global variables (source: 'v4') ------------------
+            //
+            // Elementor V4 keeps its variables in _elementor_global_variables
+            // on the kit, shaped { data: { id: {type,label,value} }, watermark,
+            // version }. A V3 widget cannot reference one and a V4 element
+            // cannot reference a V3 kit row, so both sets are returned and the
+            // CRM groups them by source. Top Dawg's V4 store measured empty on
+            // 2026-09-28; this block stays silent when that is the case.
+            $v4_raw = get_post_meta($kit_id, '_elementor_global_variables', true);
+            if (is_string($v4_raw)) {
+                $v4_raw = json_decode($v4_raw, true);
+            }
+            if (is_array($v4_raw) && isset($v4_raw['data']) && is_array($v4_raw['data'])) {
+                foreach ($v4_raw['data'] as $v4_id => $entry) {
+                    if (!is_array($entry)) continue;
+                    $v4_id = (string) $v4_id;
+                    $type  = isset($entry['type']) ? (string) $entry['type'] : '';
+                    $label = isset($entry['label']) ? (string) $entry['label'] : '';
+                    $value = isset($entry['value']) ? (string) $entry['value'] : '';
+                    if ($v4_id === '' || $value === '') continue;
+                    if (strpos($type, 'color') !== false) {
+                        $site_kit['globals'][] = [
+                            'id'     => $v4_id,
+                            'title'  => $label,
+                            'color'  => $value,
+                            'source' => 'v4',
+                        ];
+                    } elseif (strpos($type, 'font') !== false) {
+                        $site_kit['typography_globals'][] = [
+                            'id'     => $v4_id,
+                            'title'  => $label,
+                            'family' => $value,
+                            'weight' => null,
+                            'source' => 'v4',
+                        ];
+                    }
+                }
             }
         }
 

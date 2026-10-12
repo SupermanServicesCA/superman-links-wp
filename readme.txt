@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.3
 Tested up to: 6.7
-Stable tag: 2.4.1
+Stable tag: 2.4.2
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,10 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 2.4.2 =
+* FIX: /elementor/capabilities now also returns globals a THEME registers with Elementor at runtime, tagged source=theme. Neve defines colours such as nvtextcolor in its own CSS and never writes them to the kit postmeta, so the previous read missed them. On fusepowerwashing.com Elementor reports 16 colours and the old read returned 6; the 10 missing were the only ones the site renders with.
+* NEW: Elementor V4 variables from the kit meta _elementor_global_variables are returned alongside the V3 rows, tagged source=v4. A V3 widget cannot reference a V4 variable and the reverse is also true, so both sets are listed and the CRM groups them.
 
 = 2.4.1 =
 * NEW: /ping reports Rank Math Instant Indexing (IndexNow) setup: module on, auto-submit post types, and whether a key exists. The key is not returned.
