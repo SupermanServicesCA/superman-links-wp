@@ -668,6 +668,7 @@ class Superman_Links_API {
             'elementor_version' => $this->get_elementor_version(),
             'ilj_active' => $this->is_ilj_active(),
             'ilj_version' => defined('ILJ_VERSION') ? ILJ_VERSION : null,
+            'indexnow' => $this->get_indexnow_status(),
         ]);
     }
 
@@ -934,6 +935,33 @@ class Superman_Links_API {
      */
     private function is_rankmath_active() {
         return class_exists('RankMath');
+    }
+
+    /**
+     * Rank Math Instant Indexing (IndexNow) setup, for the CRM's setup check.
+     *
+     * Null when Rank Math is not active. The key itself is never returned —
+     * only whether one exists. `bing_post_types` and `indexnow_api_key` are the
+     * option keys Rank Math's own settings page reads (checked 2026-10-12 on
+     * fraservalleychristmaslights.com, Rank Math Pro).
+     */
+    private function get_indexnow_status() {
+        if (!$this->is_rankmath_active()) {
+            return null;
+        }
+        if (class_exists('\RankMath\Helper') && method_exists('\RankMath\Helper', 'is_module_active')) {
+            $module_active = (bool) \RankMath\Helper::is_module_active('instant-indexing');
+        } else {
+            $module_active = in_array('instant-indexing', (array) get_option('rank_math_modules', []), true);
+        }
+        $options = get_option('rank-math-options-instant-indexing', []);
+        $options = is_array($options) ? $options : [];
+        $post_types = isset($options['bing_post_types']) ? array_values(array_map('strval', (array) $options['bing_post_types'])) : [];
+        return [
+            'module_active' => $module_active,
+            'post_types' => $post_types,
+            'key_set' => !empty($options['indexnow_api_key']),
+        ];
     }
 
     /**

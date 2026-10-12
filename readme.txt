@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.3
 Tested up to: 6.7
-Stable tag: 2.4.0
+Stable tag: 2.4.1
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,9 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 2.4.1 =
+* NEW: /ping reports Rank Math Instant Indexing (IndexNow) setup: module on, auto-submit post types, and whether a key exists. The key is not returned.
 
 = 2.4.0 =
 * SECURITY: the updater installs only a release whose zip carries a valid Ed25519 signature from the release key. A release without a signature, or with a signature that does not match, is not offered and not installed. Other plugins' updates are not affected.
