@@ -23,6 +23,10 @@ class Superman_Links_Webhook {
         add_action('wp_trash_post', [$this, 'on_post_delete'], 10, 1);
         add_action('before_delete_post', [$this, 'on_post_delete'], 10, 1);
 
+        // Unpublish (v2.4.3): publish -> draft/pending/private/future. The CRM
+        // takes the page out of the link-source pool until its next publish.
+        add_action('transition_post_status', [$this, 'on_post_unpublish'], 10, 3);
+
         // Notify CRM when our plugin is updated
         add_action('upgrader_process_complete', [$this, 'on_plugin_updated'], 10, 2);
 
@@ -165,6 +169,26 @@ class Superman_Links_Webhook {
 
         // Send the webhook
         $this->send_webhook('post_deleted', $post_id, $post);
+    }
+
+    /**
+     * Handle a published post that leaves `publish` for anything but the trash
+     * (the trash has its own hook above).
+     */
+    public function on_post_unpublish($new_status, $old_status, $post) {
+        if ($old_status !== 'publish' || $new_status === 'publish' || $new_status === 'trash') {
+            return;
+        }
+        if (wp_is_post_revision($post->ID) || wp_is_post_autosave($post->ID)) {
+            return;
+        }
+
+        $allowed_types = apply_filters('superman_links_webhook_post_types', ['post', 'page']);
+        if (!in_array($post->post_type, $allowed_types)) {
+            return;
+        }
+
+        $this->send_webhook('post_unpublished', $post->ID, $post);
     }
 
     /**

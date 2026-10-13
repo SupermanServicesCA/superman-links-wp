@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.3
 Tested up to: 6.7
-Stable tag: 2.4.2
+Stable tag: 2.4.3
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,9 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 2.4.3 =
+* NEW: A published post or page that moves to draft, pending, private or scheduled now sends post_unpublished to the CRM. The CRM takes the page out of the link-source pool and marks its LinkFinder links lost. The next publish restores it. The trash already sent post_deleted and does not change.
 
 = 2.4.2 =
 * FIX: /elementor/capabilities now also returns globals a THEME registers with Elementor at runtime, tagged source=theme. Neve defines colours such as nvtextcolor in its own CSS and never writes them to the kit postmeta, so the previous read missed them. On fusepowerwashing.com Elementor reports 16 colours and the old read returned 6; the 10 missing were the only ones the site renders with.
