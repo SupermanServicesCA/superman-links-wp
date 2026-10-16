@@ -44,6 +44,14 @@ class Superman_Links_Settings {
         );
 
         add_settings_field(
+            'superman_links_site_url',
+            __('Site URL', 'superman-links'),
+            [$this, 'site_url_callback'],
+            'superman-links',
+            'superman_links_main'
+        );
+
+        add_settings_field(
             'superman_links_api_key',
             __('API Key', 'superman-links'),
             [$this, 'api_key_callback'],
@@ -59,6 +67,42 @@ class Superman_Links_Settings {
     }
 
     /**
+     * Site URL row (display only, not a saved option). The CRM's Connect Site
+     * dialog needs the URL and the key; this row gives both a Copy button.
+     */
+    public function site_url_callback() {
+        $site_url = untrailingslashit(home_url());
+        ?>
+        <input type="text"
+               id="superman_links_site_url"
+               value="<?php echo esc_attr($site_url); ?>"
+               class="regular-text"
+               readonly
+        />
+        <button type="button" class="button" onclick="supermanLinksCopy('superman_links_site_url', this)">
+            <?php esc_html_e('Copy', 'superman-links'); ?>
+        </button>
+        <script>
+        function supermanLinksCopy(id, btn) {
+            var field = document.getElementById(id);
+            var label = btn.textContent;
+            var done = function () {
+                btn.textContent = '<?php echo esc_js(__('Copied', 'superman-links')); ?>';
+                setTimeout(function () { btn.textContent = label; }, 1500);
+            };
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(field.value).then(done);
+                return;
+            }
+            field.select();
+            document.execCommand('copy');
+            done();
+        }
+        </script>
+        <?php
+    }
+
+    /**
      * API key field
      */
     public function api_key_callback() {
@@ -71,6 +115,9 @@ class Superman_Links_Settings {
                class="regular-text"
                readonly
         />
+        <button type="button" class="button" onclick="supermanLinksCopy('superman_links_api_key', this)">
+            <?php esc_html_e('Copy', 'superman-links'); ?>
+        </button>
         <button type="button" class="button" onclick="regenerateApiKey()">
             <?php esc_html_e('Regenerate', 'superman-links'); ?>
         </button>
