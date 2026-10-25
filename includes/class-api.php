@@ -688,6 +688,84 @@ class Superman_Links_API {
                 }
             }
 
+            // --- Neve palette globals (source: 'theme') ---------------------
+            //
+            // Neve never writes its globals to the kit, so the reader above
+            // cannot find them. Verified in Neve's own source 2026-10-25,
+            // inc/compatibility/elementor.php: init() adds
+            //   add_filter('rest_request_after_callbacks',
+            //              [$this, 'alter_global_colors_in_picker'], 999, 3)
+            // and that method matches the route '/elementor/v1/globals'
+            // exactly, then injects its colours into the RESPONSE. Nothing
+            // reaches _elementor_page_settings and nothing reaches
+            // $kit->get_settings(). Measured on fusepowerwashing.com with
+            // plugin 2.4.3: our endpoint returned 6 colours, Elementor's own
+            // route returned 16, and the 10 extra were Neve's.
+            //
+            // Neve builds those values from a plain theme mod
+            // (get_current_palette_colors() reads the ACTIVE palette of
+            // 'neve_global_colors'), so we read the same mod. That skips the
+            // REST pipeline, and with it the capability check that makes
+            // Elementor's route answer 401 for our user-0 requests.
+            //
+            // The id is the slug without hyphens, because that is how Neve
+            // builds it: str_replace('-', '', $slug). 'nv-text-color'
+            // therefore becomes 'nvtextcolor', which is the id a widget's
+            // __globals__ ref must carry.
+            $neve_mod = get_theme_mod('neve_global_colors');
+            if (is_array($neve_mod) && isset($neve_mod['activePalette'], $neve_mod['palettes'])) {
+                $neve_active  = $neve_mod['activePalette'];
+                $neve_palette = isset($neve_mod['palettes'][$neve_active]) ? $neve_mod['palettes'][$neve_active] : null;
+                $neve_colors  = [];
+                if (is_array($neve_palette) && isset($neve_palette['colors']) && is_array($neve_palette['colors'])) {
+                    $neve_colors = $neve_palette['colors'];
+                }
+
+                // Neve merges these into the same list; they are the 'custom1'
+                // style ids that the picker shows next to the nine standard ones.
+                $neve_custom = get_theme_mod('neve_global_custom_colors');
+                if (is_array($neve_custom)) {
+                    foreach ($neve_custom as $c_slug => $c_args) {
+                        if (is_array($c_args) && isset($c_args['val'])) {
+                            $neve_colors[$c_slug] = $c_args['val'];
+                        }
+                    }
+                }
+
+                // Neve's own labels, so the picker reads the same as Elementor's.
+                $neve_labels = [
+                    'nv-primary-accent'   => 'Primary Accent',
+                    'nv-secondary-accent' => 'Secondary Accent',
+                    'nv-site-bg'          => 'Site Background',
+                    'nv-light-bg'         => 'Light Background',
+                    'nv-dark-bg'          => 'Dark Background',
+                    'nv-text-color'       => 'Text Color',
+                    'nv-text-dark-bg'     => 'Text Dark Background',
+                    'nv-c-1'              => 'Extra Color 1',
+                    'nv-c-2'              => 'Extra Color 2',
+                ];
+
+                foreach ($neve_colors as $n_slug => $n_value) {
+                    if (!is_string($n_value) || $n_value === '') continue;
+                    $n_id = str_replace('-', '', (string) $n_slug);
+                    if ($n_id === '') continue;
+                    $already = false;
+                    foreach ($site_kit['globals'] as $g) {
+                        if ($g['id'] === $n_id) { $already = true; break; }
+                    }
+                    if ($already) continue;
+                    $n_label = isset($neve_labels[$n_slug])
+                        ? $neve_labels[$n_slug]
+                        : (string) $n_slug;
+                    $site_kit['globals'][] = [
+                        'id'     => $n_id,
+                        'title'  => 'Neve - ' . $n_label,
+                        'color'  => $n_value,
+                        'source' => 'theme',
+                    ];
+                }
+            }
+
             // --- V4 atomic global variables (source: 'v4') ------------------
             //
             // Elementor V4 keeps its variables in _elementor_global_variables
