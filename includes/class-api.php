@@ -781,10 +781,27 @@ class Superman_Links_API {
             if (is_array($v4_raw) && isset($v4_raw['data']) && is_array($v4_raw['data'])) {
                 foreach ($v4_raw['data'] as $v4_id => $entry) {
                     if (!is_array($entry)) continue;
+
+                    // Elementor soft-deletes a variable by adding deleted_at and
+                    // keeping the row. Its own CSS renderer skips those rows
+                    // (modules/variables/classes/css-renderer.php,
+                    // build_css_variable_entry), so we skip them too. Measured
+                    // 2026-10-26: Holiday Heroes returned 9 v4 rows, 6 of them
+                    // soft-deleted DUP_* leftovers the site does not use.
+                    if (array_key_exists('deleted_at', $entry)) continue;
+
                     $v4_id = (string) $v4_id;
                     $type  = isset($entry['type']) ? (string) $entry['type'] : '';
                     $label = isset($entry['label']) ? (string) $entry['label'] : '';
-                    $value = isset($entry['value']) ? (string) $entry['value'] : '';
+
+                    // The stored value is NOT always a string. Casting an array
+                    // with (string) yields the literal "Array", which v2.4.2 did
+                    // ship: every v4 colour read back as "Array" on 4 sites,
+                    // measured 2026-10-26. Elementor's own renderer runs
+                    // sanitize_text_field() on it, which turns an array into ''
+                    // and drops the row, so a row we cannot resolve to a scalar
+                    // is dropped here as well rather than guessed at.
+                    $value = $this->scalar_global_value($entry['value'] ?? null);
                     if ($v4_id === '' || $value === '') continue;
                     if (strpos($type, 'color') !== false) {
                         $site_kit['globals'][] = [
@@ -5067,6 +5084,38 @@ class Superman_Links_API {
      * Elementor's own revision, plain-text and after_save hooks in a request
      * that never ran them.
      */
+    /**
+     * The scalar inside an Elementor V4 variable's `value`, or '' when there is
+     * none.
+     *
+     * Elementor stores a colour or font variable's value as a plain string, and
+     * its CSS renderer reads it with sanitize_text_field(). Some rows hold an
+     * array instead. We accept the common wrappers and give up on anything
+     * else, because a wrong colour is worse than a missing one - that is the
+     * lesson of the 2.08:1 lavender.
+     */
+    private function scalar_global_value($value) {
+        if (is_string($value)) {
+            return trim($value);
+        }
+        if (is_int($value) || is_float($value)) {
+            return (string) $value;
+        }
+        if (is_array($value)) {
+            // { "$$type": "color", "value": "#123456" } and friends.
+            if (isset($value['value']) && (is_string($value['value']) || is_numeric($value['value']))) {
+                return trim((string) $value['value']);
+            }
+            // A size variable: { "size": 16, "unit": "px" }. Not a colour or a
+            // font family, so the caller's type check should already have
+            // skipped it; return it only when both parts are present.
+            if (isset($value['size'], $value['unit']) && is_numeric($value['size']) && is_string($value['unit'])) {
+                return $value['size'] . $value['unit'];
+            }
+        }
+        return '';
+    }
+
     private function write_elementor_tree($post_id, array $tree) {
         $json = wp_json_encode($tree);
         if ($json === false) {

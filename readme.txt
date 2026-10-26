@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.3
 Tested up to: 6.7
-Stable tag: 2.4.5
+Stable tag: 2.4.6
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,10 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 2.4.6 =
+* FIX: Elementor V4 global colours read back as the text "Array" instead of a colour. The stored value is not always plain text, and the old code forced it to text.
+* FIX: A deleted Elementor V4 variable no longer appears in the Page Builder. Elementor keeps a deleted variable in storage and hides it; the plugin now hides it too.
 
 = 2.4.5 =
 * FIX: On a site that runs the Neve theme, the Page Builder now sees the colours the site renders with. Neve adds its palette to Elementor by filtering the REST response, so its colours never reach the Elementor kit and version 2.4.2's kit read could not find them. This version reads Neve's palette directly.
