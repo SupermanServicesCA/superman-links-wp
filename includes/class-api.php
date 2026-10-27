@@ -712,7 +712,24 @@ class Superman_Links_API {
             // builds it: str_replace('-', '', $slug). 'nv-text-color'
             // therefore becomes 'nvtextcolor', which is the id a widget's
             // __globals__ ref must carry.
+            // A Neve site that never opened the palette customizer has NO
+            // theme mod at all. get_theme_mod() then returns false and this
+            // reader used to return nothing, although the site renders the
+            // full palette - Neve passes neve_get_global_colors_default(true)
+            // as the default argument in get_current_palette_colors(), so the
+            // defaults are what the CSS carries.
+            //
+            // Verified on precisionwindowwashing.ca 2026-10-26: the site runs
+            // themes/neve, Elementor's own /elementor/v1/globals returned 13
+            // colours including all 9 nv*, our endpoint returned 4, and every
+            // rendered value matched Neve's defaults exactly (nv-primary-accent
+            // #2f5aae, nv-secondary-accent #24478c, nv-dark-bg #121212,
+            // nv-text-color #272626). Calling Neve's own function keeps the
+            // defaults in one place instead of copying hex into this file.
             $neve_mod = get_theme_mod('neve_global_colors');
+            if (!is_array($neve_mod) && function_exists('neve_get_global_colors_default')) {
+                $neve_mod = neve_get_global_colors_default(true);
+            }
             if (is_array($neve_mod) && isset($neve_mod['activePalette'], $neve_mod['palettes'])) {
                 $neve_active  = $neve_mod['activePalette'];
                 $neve_palette = isset($neve_mod['palettes'][$neve_active]) ? $neve_mod['palettes'][$neve_active] : null;
