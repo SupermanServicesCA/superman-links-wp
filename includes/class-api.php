@@ -1995,7 +1995,14 @@ class Superman_Links_API {
     private function apply_elementor_template($post_id, $template_data, $is_new = false) {
         $elementor_data = $template_data['elementor']['data'] ?? null;
         $page_settings = $template_data['elementor']['page_settings'] ?? null;
-        $template_type = $template_data['page']['template_type'] ?? 'page';
+        // Keep the page's own template type when the caller does not send one.
+        // 'page' is a LIBRARY template; a WP page is 'wp-page'. Overwriting
+        // 'wp-page' with 'page' breaks the front-end render of that page
+        // (HTTP 500 on thebugmanfraservalley.com/abbotsford/, 2026-11-01).
+        // Only a brand-new page with no meta falls back to 'page'.
+        $existing_template_type = get_post_meta($post_id, '_elementor_template_type', true);
+        $template_type = $template_data['page']['template_type']
+            ?? ($existing_template_type ?: ($is_new ? 'page' : 'wp-page'));
 
         // Encode data as JSON if it's an array. `update_post_meta` runs
         // `wp_unslash` internally and will strip `\uXXXX` / `\/` escapes,
