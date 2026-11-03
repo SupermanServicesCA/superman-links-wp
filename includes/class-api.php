@@ -741,10 +741,20 @@ class Superman_Links_API {
                 // Neve merges these into the same list; they are the 'custom1'
                 // style ids that the picker shows next to the nine standard ones.
                 $neve_custom = get_theme_mod('neve_global_custom_colors');
+                $neve_custom_labels = [];
                 if (is_array($neve_custom)) {
                     foreach ($neve_custom as $c_slug => $c_args) {
                         if (is_array($c_args) && isset($c_args['val'])) {
                             $neve_colors[$c_slug] = $c_args['val'];
+                            // Neve names a custom colour from its own label
+                            // ($label_map[$slug] = $args['label'] in
+                            // alter_global_colors_in_picker). Without this the
+                            // title fell back to the slug, so Fuse's custom
+                            // colour read "Neve - custom-1" instead of the name
+                            // the human gave it.
+                            if (isset($c_args['label']) && is_string($c_args['label']) && $c_args['label'] !== '') {
+                                $neve_custom_labels[$c_slug] = $c_args['label'];
+                            }
                         }
                     }
                 }
@@ -771,9 +781,13 @@ class Superman_Links_API {
                         if ($g['id'] === $n_id) { $already = true; break; }
                     }
                     if ($already) continue;
-                    $n_label = isset($neve_labels[$n_slug])
-                        ? $neve_labels[$n_slug]
-                        : (string) $n_slug;
+                    if (isset($neve_custom_labels[$n_slug])) {
+                        $n_label = $neve_custom_labels[$n_slug];
+                    } elseif (isset($neve_labels[$n_slug])) {
+                        $n_label = $neve_labels[$n_slug];
+                    } else {
+                        $n_label = (string) $n_slug;
+                    }
                     $site_kit['globals'][] = [
                         'id'     => $n_id,
                         'title'  => 'Neve - ' . $n_label,

@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.3
 Tested up to: 6.7
-Stable tag: 2.4.7
+Stable tag: 2.4.8
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,10 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 2.4.8 =
+* FIX: Writing an Elementor template no longer changes a page's template type. A page could return a server error after a write. This shipped in the source on 2026-11-01 but had no release until now.
+* FIX: A Neve custom colour now shows the name you gave it, not its internal slug.
 
 = 2.4.7 =
 * FIX: On a Neve site that never changed the colour palette, the Page Builder saw no theme colours. Neve falls back to its default palette, and the plugin now uses the same fallback.
