@@ -918,6 +918,22 @@ class Superman_Links_API {
             'suppress_filters' => true,
         ]);
 
+        // id => hex, from the same reader /elementor/capabilities uses, so a
+        // container's background colour is resolved rather than guessed at.
+        $palette = [];
+        $caps = $this->get_elementor_capabilities($request);
+        if (!is_wp_error($caps)) {
+            $caps_data = $caps instanceof WP_REST_Response ? $caps->get_data() : $caps;
+            $kit_globals = isset($caps_data['site_kit']['globals']) ? $caps_data['site_kit']['globals'] : [];
+            if (is_array($kit_globals)) {
+                foreach ($kit_globals as $entry) {
+                    if (is_array($entry) && isset($entry['id'], $entry['color'])) {
+                        $palette[(string) $entry['id']] = (string) $entry['color'];
+                    }
+                }
+            }
+        }
+
         $plain   = [];
         $on_dark = [];
         $scanned = [];
@@ -935,12 +951,13 @@ class Superman_Links_API {
                 'post_id' => (int) $post_id,
                 'title'   => get_the_title($post_id),
             ];
-            $this->walk_elementor_for_globals($tree, false, $plain, $on_dark);
+            $this->walk_elementor_for_globals($tree, false, $plain, $on_dark, $palette);
         }
 
         return rest_ensure_response([
             'scanned_pages' => $scanned,
             'page_count'    => count($scanned),
+            'palette'       => (object) $palette,
             'on_background' => (object) $plain,
             'on_dark'       => (object) $on_dark,
             'generated_at'  => gmdate('c'),
@@ -954,7 +971,7 @@ class Superman_Links_API {
      * light on dark". A plain background colour does not - the client's own
      * site background is a colour, and excluding it would discard most widgets.
      */
-    private function elementor_paints_over($settings) {
+    private function elementor_paints_over($settings, $palette = []) {
         if (!is_array($settings)) {
             return false;
         }
@@ -975,7 +992,68 @@ class Superman_Links_API {
         if (!empty($settings['background_video_link'])) {
             return true;
         }
-        return false;
+
+        // A DARK background colour is a dark background. This used to return
+        // false for every colour, on the reasoning that the site background is
+        // itself a colour and excluding colours would discard most widgets.
+        // That is right for a light colour and wrong for a dark one. Measured
+        // on precisionwindowwashing.ca 2026-11-05: the site has 46 containers
+        // whose background_color is `primary` (#0F09AE), and the 72 headings
+        // inside them bind to nvsitebg (#ffffff). Ignoring the colour filed all
+        // 72 as "on a plain background", so white won the heading role outright
+        // and every generated page would have been white on white.
+        //
+        // The value is resolved, never guessed: a literal hex is read as-is and
+        // a global ref is looked up in the kit palette this scan already holds.
+        $value = null;
+        if (!empty($globals['background_color'])) {
+            $value = $this->resolve_global_color($globals['background_color'], $palette);
+        } elseif (!empty($settings['background_color'])) {
+            $value = $settings['background_color'];
+        }
+        return $value !== null && $this->color_is_dark($value);
+    }
+
+    /** 'globals/colors?id=primary' -> '#0F09AE', using the kit palette. */
+    private function resolve_global_color($ref, $palette) {
+        if (!is_string($ref) || !preg_match('#^globals/colors\?id=(.+)$#', $ref, $m)) {
+            return null;
+        }
+        $id = $m[1];
+        return isset($palette[$id]) && is_string($palette[$id]) ? $palette[$id] : null;
+    }
+
+    /**
+     * WCAG relative luminance. Below 0.5 means light text sits on it.
+     *
+     * Handles #rgb, #rrggbb and #rrggbbaa. An alpha below 25% is treated as
+     * not-dark: a near-transparent overlay does not darken what is behind it.
+     */
+    private function color_is_dark($hex) {
+        if (!is_string($hex)) {
+            return false;
+        }
+        $hex = ltrim(trim($hex), '#');
+        if (strlen($hex) === 3) {
+            $hex = $hex[0] . $hex[0] . $hex[1] . $hex[1] . $hex[2] . $hex[2];
+        }
+        if (!preg_match('/^[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/', $hex)) {
+            return false;
+        }
+        if (strlen($hex) === 8) {
+            $alpha = hexdec(substr($hex, 6, 2)) / 255;
+            if ($alpha < 0.25) {
+                return false;
+            }
+            $hex = substr($hex, 0, 6);
+        }
+        $channels = [];
+        foreach ([0, 2, 4] as $offset) {
+            $c = hexdec(substr($hex, $offset, 2)) / 255;
+            $channels[] = $c <= 0.03928 ? $c / 12.92 : pow(($c + 0.055) / 1.055, 2.4);
+        }
+        $luminance = 0.2126 * $channels[0] + 0.7152 * $channels[1] + 0.0722 * $channels[2];
+        return $luminance < 0.5;
     }
 
     /**
@@ -984,7 +1062,7 @@ class Superman_Links_API {
      * $over stays true for every descendant once an ancestor paints over, which
      * is what keeps the light-on-dark variants out of the on-background tally.
      */
-    private function walk_elementor_for_globals($elements, $over, &$plain, &$on_dark) {
+    private function walk_elementor_for_globals($elements, $over, &$plain, &$on_dark, $palette = []) {
         if (!is_array($elements)) {
             return;
         }
@@ -995,7 +1073,7 @@ class Superman_Links_API {
             $settings = isset($element['settings']) && is_array($element['settings'])
                 ? $element['settings']
                 : [];
-            $here = $over || $this->elementor_paints_over($settings);
+            $here = $over || $this->elementor_paints_over($settings, $palette);
 
             $globals = isset($settings['__globals__']) && is_array($settings['__globals__'])
                 ? $settings['__globals__']
@@ -1030,7 +1108,7 @@ class Superman_Links_API {
             }
 
             if (!empty($element['elements'])) {
-                $this->walk_elementor_for_globals($element['elements'], $here, $plain, $on_dark);
+                $this->walk_elementor_for_globals($element['elements'], $here, $plain, $on_dark, $palette);
             }
         }
     }

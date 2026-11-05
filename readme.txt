@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.3
 Tested up to: 6.7
-Stable tag: 2.4.9
+Stable tag: 2.4.10
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,9 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 2.4.10 =
+* FIX: Text on a dark coloured panel is no longer mistaken for your normal body text. White headings on dark sections were being counted as your main text colour.
 
 = 2.4.9 =
 * NEW: The CRM can now read which global colour each part of your site actually uses, measured from your own pages. Before this it could only list the colours that exist.
