@@ -414,6 +414,13 @@ class Superman_Links_API {
             'permission_callback' => [$this, 'check_api_key'],
         ]);
 
+        // Which global fills which role, measured from the site's own pages
+        register_rest_route($this->namespace, '/elementor/global-usage', [
+            'methods' => 'GET',
+            'callback' => [$this, 'get_elementor_global_usage'],
+            'permission_callback' => [$this, 'check_api_key'],
+        ]);
+
         // Patch one widget on an existing Elementor page (shallow-merge settings)
         register_rest_route($this->namespace, '/elementor/widget/(?P<post_id>\d+)/(?P<element_id>[a-f0-9]+)', [
             'methods' => 'PATCH',
@@ -861,6 +868,171 @@ class Superman_Links_API {
             'available_widgets' => $available_widgets,
             'site_kit'          => $site_kit,
         ]);
+    }
+
+    /**
+     * Which global each role should bind to, measured from real pages.
+     *
+     * The kit palette says which globals EXIST. It never says which one fills
+     * which role, so every binding before this was a human reading colours off
+     * a rendered page. That is unreliable in a specific way: a rendered colour
+     * cannot tell a global reference from a hard-coded literal. On
+     * precisionwindowwashing.ca the body text renders #0F09AE, which matches
+     * the kit's `primary`, but every widget references `secondary` - both
+     * resolve to the same hex, so no screenshot can separate them, and a
+     * binding taken from the pixels breaks the moment the client edits one.
+     *
+     * So read the binding itself: settings.__globals__ holds
+     * '<control key>' => 'globals/colors?id=<id>'.
+     *
+     * Light-on-dark variants must not win. A heading over a photo is white, and
+     * on Precision those outnumber the on-white headings 2 to 1 - a plain "most
+     * common wins" tally would bind heading_color to white and every generated
+     * page would be white on white. Any widget inside a container carrying a
+     * background image or a background overlay is therefore counted separately
+     * and never contributes to the on-background tally.
+     */
+    public function get_elementor_global_usage($request) {
+        if (!defined('ELEMENTOR_VERSION')) {
+            return new WP_Error(
+                'elementor_not_active',
+                __('Elementor is not active on this site.', 'superman-links'),
+                ['status' => 400]
+            );
+        }
+
+        $limit = (int) $request->get_param('limit');
+        if ($limit <= 0 || $limit > 100) {
+            $limit = 25;
+        }
+
+        $post_ids = get_posts([
+            'post_type'        => ['page', 'post'],
+            'post_status'      => 'publish',
+            'posts_per_page'   => $limit,
+            'orderby'          => 'modified',
+            'order'            => 'DESC',
+            'fields'           => 'ids',
+            'meta_key'         => '_elementor_edit_mode',
+            'meta_value'       => 'builder',
+            'suppress_filters' => true,
+        ]);
+
+        $plain   = [];
+        $on_dark = [];
+        $scanned = [];
+
+        foreach ($post_ids as $post_id) {
+            $raw = get_post_meta($post_id, '_elementor_data', true);
+            if (!is_string($raw) || $raw === '') {
+                continue;
+            }
+            $tree = json_decode($raw, true);
+            if (!is_array($tree)) {
+                continue;
+            }
+            $scanned[] = [
+                'post_id' => (int) $post_id,
+                'title'   => get_the_title($post_id),
+            ];
+            $this->walk_elementor_for_globals($tree, false, $plain, $on_dark);
+        }
+
+        return rest_ensure_response([
+            'scanned_pages' => $scanned,
+            'page_count'    => count($scanned),
+            'on_background' => (object) $plain,
+            'on_dark'       => (object) $on_dark,
+            'generated_at'  => gmdate('c'),
+        ]);
+    }
+
+    /**
+     * Does this element paint a background that its children sit on top of?
+     *
+     * A background image or a background overlay both mean "the text in here is
+     * light on dark". A plain background colour does not - the client's own
+     * site background is a colour, and excluding it would discard most widgets.
+     */
+    private function elementor_paints_over($settings) {
+        if (!is_array($settings)) {
+            return false;
+        }
+        foreach (['background_image', 'background_overlay_image'] as $image_key) {
+            if (!empty($settings[$image_key]['url'])) {
+                return true;
+            }
+        }
+        if (!empty($settings['background_overlay_color'])) {
+            return true;
+        }
+        $globals = isset($settings['__globals__']) && is_array($settings['__globals__'])
+            ? $settings['__globals__']
+            : [];
+        if (!empty($globals['background_overlay_color'])) {
+            return true;
+        }
+        if (!empty($settings['background_video_link'])) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Walk the tree and tally '<widgetType>.<control>' => '<global id>'.
+     *
+     * $over stays true for every descendant once an ancestor paints over, which
+     * is what keeps the light-on-dark variants out of the on-background tally.
+     */
+    private function walk_elementor_for_globals($elements, $over, &$plain, &$on_dark) {
+        if (!is_array($elements)) {
+            return;
+        }
+        foreach ($elements as $element) {
+            if (!is_array($element)) {
+                continue;
+            }
+            $settings = isset($element['settings']) && is_array($element['settings'])
+                ? $element['settings']
+                : [];
+            $here = $over || $this->elementor_paints_over($settings);
+
+            $globals = isset($settings['__globals__']) && is_array($settings['__globals__'])
+                ? $settings['__globals__']
+                : [];
+            $type = '';
+            if (!empty($element['widgetType'])) {
+                $type = (string) $element['widgetType'];
+            } elseif (!empty($element['elType'])) {
+                $type = (string) $element['elType'];
+            }
+
+            foreach ($globals as $control => $ref) {
+                if (!is_string($ref) || $ref === '' || !is_string($control)) {
+                    continue;
+                }
+                if (!preg_match('#^globals/(colors|typography)\?id=(.+)$#', $ref, $matches)) {
+                    continue;
+                }
+                $key = $type . '.' . $control;
+                $id  = $matches[1] === 'colors' ? $matches[2] : 'typography:' . $matches[2];
+                if ($here) {
+                    if (!isset($on_dark[$key][$id])) {
+                        $on_dark[$key][$id] = 0;
+                    }
+                    $on_dark[$key][$id]++;
+                } else {
+                    if (!isset($plain[$key][$id])) {
+                        $plain[$key][$id] = 0;
+                    }
+                    $plain[$key][$id]++;
+                }
+            }
+
+            if (!empty($element['elements'])) {
+                $this->walk_elementor_for_globals($element['elements'], $here, $plain, $on_dark);
+            }
+        }
     }
 
     /**

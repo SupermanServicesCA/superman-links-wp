@@ -3,7 +3,7 @@ Contributors: supermanservices
 Tags: seo, rankmath, api, crm, elementor
 Requires at least: 5.3
 Tested up to: 6.7
-Stable tag: 2.4.8
+Stable tag: 2.4.9
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -44,6 +44,10 @@ Superman Links plugin creates REST API endpoints that allow your Superman Links 
 Updates will appear automatically in your WordPress dashboard when new releases are published.
 
 == Changelog ==
+
+= 2.4.9 =
+* NEW: The CRM can now read which global colour each part of your site actually uses, measured from your own pages. Before this it could only list the colours that exist.
+* Text over a background photo is counted apart from text on a plain background, so a white heading on a photo cannot be mistaken for your body text colour.
 
 = 2.4.8 =
 * FIX: Writing an Elementor template no longer changes a page's template type. A page could return a server error after a write. This shipped in the source on 2026-11-01 but had no release until now.
